@@ -1,0 +1,24 @@
+{
+  "name": "codex-to-zcode-bridge",
+  "version": "0.3.0",
+  "description": "Local ZCode sessions, models, questions, permissions and dynamic workflows.",
+  "author": {
+    "name": "cateyemizuki"
+  },
+  "repository": "https://github.com/cateyemizuki/codex-to-zcode-bridge",
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Codex to ZCode Bridge",
+    "shortDescription": "本机 ZCode 会话、模型与动态工作流",
+    "longDescription": "纯 MCP 桌面插件，提供原生设置和内嵌配置面板，不依赖 GPT 侧 skill。",
+    "developerName": "cateyemizuki",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "brandColor": "#72E2B5"
+  }
+}

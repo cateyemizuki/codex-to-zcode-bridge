@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "zcode_bridge": {
+      "command": "python",
+      "args": [
+        "-c",
+        "import runpy,sys;from pathlib import Path;p=Path(sys.argv[1])/\"bridge.py\";sys.path.insert(0,str(p.parent));sys.argv=[str(p),*sys.argv[2:]];runpy.run_path(str(p),run_name=\"__main__\")",
+        "${CLAUDE_PLUGIN_ROOT}",
+        "mcp"
+      ]
+    }
+  }
+}

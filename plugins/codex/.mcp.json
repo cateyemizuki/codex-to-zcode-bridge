@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "zcode_bridge": {
+      "command": "python",
+      "args": [
+        "-m",
+        "zcode_bridge",
+        "mcp"
+      ]
+    }
+  }
+}

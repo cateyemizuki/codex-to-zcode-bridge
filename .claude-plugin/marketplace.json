@@ -1,0 +1,11 @@
+{
+  "name": "codex-to-zcode-bridge-plugins",
+  "plugins": [
+    {
+      "name": "codex-to-zcode-bridge",
+      "version": "0.3.0",
+      "source": "./plugins/zcode",
+      "description": "Codex to ZCode Bridge administration and local MCP tools."
+    }
+  ]
+}

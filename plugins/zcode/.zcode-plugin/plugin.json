@@ -1,0 +1,13 @@
+{
+  "name": "codex-to-zcode-bridge",
+  "version": "0.3.0",
+  "description": "Local ZCode sessions, models, questions, permissions and dynamic workflows.",
+  "author": {
+    "name": "cateyemizuki"
+  },
+  "repository": "https://github.com/cateyemizuki/codex-to-zcode-bridge",
+  "license": "MIT",
+  "mcpServers": "./.mcp.json",
+  "skills": "./skills",
+  "commands": "./commands"
+}

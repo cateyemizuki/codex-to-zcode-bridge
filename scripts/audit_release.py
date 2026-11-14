@@ -2,13 +2,13 @@
 import argparse
 import json
 import re
-import sys
 import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_NAMES = {'connection.json','sessions.json','installation.json','verification.json',
-    'provider_config.json','config.json','.env','credentials.json','auth.json'}
+    'provider_config.json','config.json','.env','credentials.json','auth.json',
+    'notifications.json','subscriptions.json','inbox.json','outbox.json','host_capability.json'}
 PATTERNS = {
     'absolute Windows path': re.compile(r'(?<![A-Za-z0-9])[A-Za-z]:[\\/](?:[^\s\"\'<>]+)'),
     'private provider ID': re.compile(r'new-provider-\d+'),
@@ -22,7 +22,9 @@ PATTERNS = {
 def inspect(name, data):
     p = Path(name)
     errors = []
-    if p.name in FORBIDDEN_NAMES or p.suffix in ('.pyc','.log','.sqlite','.db','.bak') or '__pycache__' in p.parts:
+    if (p.name in FORBIDDEN_NAMES
+            or (p.name.startswith('notifications.') and p.suffix == '.json')
+            or p.suffix in ('.pyc','.log','.sqlite','.db','.bak') or '__pycache__' in p.parts):
         errors.append(name+': local state or backup file')
     if p.suffix in ('.md','.py','.json','.toml','.yml','.yaml','.html','.txt') or p.name in ('LICENSE','.gitignore'):
         text = data.decode('utf-8')
@@ -37,7 +39,8 @@ def audit(root=ROOT, archives=True):
     errors, count = [], 0
     for p in root.rglob('*'):
         relative = p.relative_to(root)
-        if not p.is_file() or any(x in relative.parts for x in ('.git','__pycache__','.venv','dist','build')) or p.suffix=='.pyc':
+        # `.zcode` is the local client's own state directory, not release input.
+        if not p.is_file() or any(x in relative.parts for x in ('.git','__pycache__','.venv','dist','build','.zcode')) or p.suffix=='.pyc':
             continue
         count += 1
         errors += inspect(relative.as_posix(), p.read_bytes())

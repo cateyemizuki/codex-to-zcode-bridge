@@ -11,7 +11,8 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'runtime'))
 from zcode_bridge import mcp, storage
-from zcode_bridge.service import Bridge, caller_mode, compact_messages
+from zcode_bridge.protocol import ProtocolError
+from zcode_bridge.service import Bridge, ObserverRuntimeAdapter, caller_mode, compact_messages
 from zcode_bridge.tools import TOOLS
 from zcode_bridge.workflows import actor_session_id, topology
 
@@ -177,6 +178,71 @@ class BridgeTests(unittest.TestCase):
         row={'info':{'role':'assistant'},'messageId':'top','parts':[]}
         self.assertEqual(compact_messages([row])[0]['id'],'top')
 
+    def test_last_message_anchor_skips_318_synthetic_tokens_record(self):
+        rows=[
+            {'info':{'messageId':'m2','role':'assistant'},'parts':[]},
+            {'info':{'messageId':'tokens','role':'user','synthetic':True,
+                     'semantics':{'uiVisibility':'hidden'}},'parts':[]},
+        ]
+        self.bridge.rpc.return_value={'messages':rows}
+        self.assertEqual(self.bridge._last_message_id(SID),'m2')
+        self.assertEqual(self.bridge._last_user_message_id(SID),'')
+
+    def test_last_user_anchor_uses_318_message_id_and_skips_synthetic(self):
+        rows=[
+            {'info':{'messageId':'old-user','role':'user'},'parts':[]},
+            {'info':{'messageId':'real-user','role':'user'},'parts':[]},
+            {'info':{'messageId':'synth-user','role':'user','synthetic':True,
+                     'semantics':{'uiVisibility':'hidden'}},'parts':[]},
+        ]
+        self.bridge.rpc.return_value={'messages':rows}
+        self.assertEqual(self.bridge._last_user_message_id(SID),'real-user')
+
+    def test_reconcile_skips_synthetic_and_uses_318_message_id(self):
+        sub={'session_id':SID,'turn':{'input_id':'inp-1'}}
+        rows=[
+            {'info':{'messageId':'synth-user','role':'user','inputId':'inp-1','synthetic':True,
+                     'semantics':{'uiVisibility':'hidden'}},'parts':[]},
+            {'info':{'messageId':'real-user','role':'user','inputId':'inp-1'},'parts':[]},
+        ]
+        self.bridge.rpc.return_value={'messages':rows}
+        self.assertEqual(self.bridge._reconcile_send(sub),
+            {'messageId':'real-user','userMessageId':'real-user'})
+
+    def test_bridge_exposes_observer_runtime_interface(self):
+        runtime=ObserverRuntimeAdapter(self.bridge)
+        for name in ('engine_identity','pending','ensure_session','snapshot','jobs',
+                     'workflows','children','session_events','stream_id','messages',
+                     'run_topology'):
+            self.assertTrue(callable(getattr(runtime,name,None)),name)
+
+    def test_observer_collect_uses_real_bridge_adapter(self):
+        from zcode_bridge.notifications import Observer
+        def rpc(method,params=None,deadline=None):
+            if method=='session/read': return snapshot(count=1)
+            if method=='session/messages':
+                return {'messages':[{'info':{'messageId':'m1','role':'user'},'parts':[]},
+                                    {'info':{'messageId':'m2','role':'assistant'},'parts':[]}]}
+            if method=='session/events': return {'events':[]}
+            if method=='session/subagents': return {'childSessionIds':[]}
+            if method=='v4/conversation/workflowRuns': return {'runs':[]}
+            return {}
+        self.bridge.rpc=Mock(side_effect=rpc)
+        self.bridge.client.child.pid=123
+        sub={'subscription_id':'sub_test','session_id':SID,'revision':1,
+             'turn':{'input_id':'inp-1','send_accepted':True,'send_result_message_id':'m1',
+                     'before_message_id':'m0','before_turn_count':0,'sent_at':1,
+                     'engine_pid':123,'generation':0},
+             'native':{},'last_native_seq':0,'known_child_ids':[],
+             'baseline':{'job_ids':[],'active_job_ids':[],'run_ids':[],
+                         'terminal_run_ids':[],'active_run_ids':[],'child_ids':[],
+                         'active_child_ids':[],'truncated':False}}
+        evidence=Observer(self.bridge.notifications,ObserverRuntimeAdapter(self.bridge)).collect(sub)
+        self.assertTrue(evidence['engine_ok'])
+        self.assertEqual(evidence['status'],'idle')
+        self.assertEqual(evidence['turn_count'],1)
+        self.assertEqual(evidence['final_message_id'],'m2')
+
     def test_raw_transcript_is_available_explicitly(self):
         raw={'messages':[message('1',synthetic=True)]}
         self.bridge.rpc.return_value=raw
@@ -216,13 +282,13 @@ class BridgeTests(unittest.TestCase):
         self.assertNotIn('available',self.bridge.summary(original)['settings']['model'])
         self.assertIn('available',original['settings']['model'])
 
-    def test_wait_does_not_confuse_accepted_with_completed(self):
-        self.bridge.accepted[SID]={'before_turn_count':0}
-        self.bridge.snapshot=Mock(side_effect=[snapshot(count=0),snapshot(count=1)])
-        with patch('zcode_bridge.service.time.sleep'):
-            result=self.bridge.call('zcode_wait',{'session_id':SID,'timeout_seconds':3})
-        self.assertEqual(result['projection']['turnCount'],1)
-        self.assertFalse(result['delivery']['awaiting_start'])
+    def test_wait_without_subscription_never_confirms_completion(self):
+        self.bridge.snapshot=Mock(return_value=snapshot())
+        result=self.bridge.call('zcode_wait',{'session_id':SID,'timeout_seconds':1})
+        self.assertEqual(result['verdict'],'unknown')
+        self.assertFalse(result['confirmed'])
+        self.assertEqual(result['reason_code'],'no_subscription')
+        self.assertIsNone(result['subscription_id'])
 
     def test_wait_ignores_unrelated_session_question(self):
         self.bridge._request(self.request(sessionId='sess_other'))
@@ -310,21 +376,427 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(TOOLS),len({t['name'] for t in TOOLS}))
         self.assertTrue(all(t['inputSchema']['type']=='object' for t in TOOLS))
 
+    def test_subagents_reports_child_projection_not_run_status(self):
+        actor={'siteId':'actor#1','ordinal':1}
+        child=actor_session_id('run-1',actor)
+        self.bridge.resident.add(child)
+        def rpc(method,params=None,deadline=None):
+            if method=='session/subagents':
+                return {'childSessionIds':[child],'ended':[]}
+            if method=='v4/conversation/workflowRuns':
+                return {'runs':[{'runId':'run-1','status':'completed'}]}
+            if method=='v4/conversation/workflowRunEvents':
+                return {'events':[{'sequence':1,'type':'actor-created','payload':{'actor':actor}}],'hasMore':False}
+            if method=='session/read':
+                return {'session':{'sessionId':child},'projection':{'status':'waiting','turnCount':1},
+                    'runtime':{},'settings':{'model':{'current':{'providerId':'p','modelId':'m'}},
+                    'thoughtLevel':{'current':'high'}}}
+            return snapshot()
+        self.bridge.rpc=Mock(side_effect=rpc)
+        result=self.bridge.call('zcode_subagents',{'session_id':SID})
+        self.assertIn(child,result['childSessionIds'])
+        actor_row=result['workflow_children'][0]
+        self.assertEqual(actor_row['projection_status'],'waiting')
+        self.assertEqual(actor_row['run_status'],'completed')
+        self.assertTrue(actor_row['verified'])
+
     def test_mcp_app_resource_is_bundled(self):
         result=mcp.handle({'method':'resources/read','params':{'uri':mcp.UI_URI}})
         self.assertIn('默认主代理模型',result['contents'][0]['text'])
         self.assertEqual(result['contents'][0]['mimeType'],'text/html;profile=mcp-app')
 
+    def test_turn_metadata_accepts_json_string_and_object(self):
+        for meta in ({'x-codex-turn-metadata': {'thread_id': 'chat-json'}},
+                     {'x-codex-turn-metadata': json.dumps({'thread_id': 'chat-json'})}):
+            context=mcp.normalize_context(meta)
+            self.assertEqual(context['thread_id'],'chat-json')
+            self.assertEqual(context['thread_origin'],'turn_metadata')
+
+    def test_turn_metadata_conflict_is_rejected_after_parsing(self):
+        with self.assertRaisesRegex(ValueError,'source_conflict'):
+            mcp.normalize_context({'x-codex-turn-metadata':json.dumps({'thread_id':'t1'}),
+                                   'openai/threadId':'t2'})
+
     def test_mcp_wait_does_not_block_concurrent_requests(self):
         root=Path(__file__).resolve().parents[1]/'runtime'
         script=('import sys,time;sys.path.insert(0,sys.argv[1]);from zcode_bridge import mcp;'
-            'mcp.local_call=lambda name,args:(time.sleep(.6) or {}) if name=="zcode_wait" else {};mcp.serve()')
+            'mcp.local_call=lambda name,args,context=None,**kwargs:'
+            '(time.sleep(.6) or {}) if name=="zcode_wait" else {};mcp.serve()')
         process=subprocess.Popen([sys.executable,'-c',script,str(root)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        requests=[{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'zcode_wait','arguments':{}}},
+        requests=[{'jsonrpc':'2.0','id':1,'method':'tools/call','params':{
+                'name':'zcode_wait','arguments':{},
+                '_meta':{'x-codex-turn-metadata':{'thread_id':'synthetic-test-thread'}}}},
             {'jsonrpc':'2.0','id':2,'method':'ping'}]
         output,error=process.communicate(('\n'.join(json.dumps(r) for r in requests)+'\n').encode(),timeout=8)
         self.assertEqual(process.returncode,0,error.decode())
         self.assertEqual([json.loads(line)['id'] for line in output.splitlines()],[2,1])
+
+
+class FakeEngineClient:
+    """Transport double at the Client boundary, so Bridge.rpc stays real."""
+
+    def __init__(self,*outcomes):
+        self.outcomes=list(outcomes)
+        self.calls=[]
+        self.child=Mock()
+        self.child.poll.return_value=None
+        self.child.pid=4242
+
+    def request(self,method,params=None,timeout=40):
+        self.calls.append((method,copy.deepcopy(params or {})))
+        outcome=self.outcomes.pop(0) if self.outcomes else {}
+        if isinstance(outcome,BaseException):
+            raise outcome
+        if callable(outcome):
+            return outcome(method,params)
+        return copy.deepcopy(outcome)
+
+    def respond(self,*args,**kwargs):
+        pass
+
+    def methods(self):
+        return [name for name,_ in self.calls]
+
+
+def runtime_not_ready():
+    return ProtocolError({'code':-32004,'message':'Session runtime is not ready',
+                          'data':{'code':'runtimeNotReady'}})
+
+
+def session_not_found(sid):
+    return ProtocolError({'code':-32004,'message':f'Session not found: {sid}'})
+
+
+class StaleRuntimeRecoveryTests(unittest.TestCase):
+    """A live engine can drop a resident runtime; only reads may re-attach."""
+
+    SID='sess_stale'
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.env=patch.dict(os.environ,{'ZCODE_BRIDGE_STATE':self.tmp.name})
+        self.env.start()
+        executable=Path(self.tmp.name)/'ZCode.exe'
+        executable.touch()
+        self.cfg=patch('zcode_bridge.service.config', return_value={**storage.defaults(),
+            'zcode_executable':str(executable),'auto_launch_desktop':True,
+            'default_model':{'providerId':'p','modelId':'m'},'default_thought_level':'high',
+            'default_workspace':self.tmp.name})
+        self.cfg.start()
+        self.bridge=Bridge()
+        self.bridge.resident.add(self.SID)
+        self.bridge.sessions[self.SID]={'workflow_mode':'onDemand'}
+        self.client=FakeEngineClient()
+        self.bridge.client=self.client
+        self.bridge.generation=1
+        self.bridge.capabilities_generation=1
+
+    def tearDown(self):
+        self.cfg.stop()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_read_runtime_not_ready_resumes_same_session_then_retries_once(self):
+        expected=snapshot()
+        self.client.outcomes=[runtime_not_ready(),expected,expected]
+        self.assertEqual(self.bridge.rpc('session/read',{'sessionId':self.SID,'messageLimit':10}),expected)
+        self.assertEqual(self.client.methods(),['session/read','session/resume','session/read'])
+        resume=self.client.calls[1][1]
+        self.assertEqual(resume['sessionId'],self.SID)
+        self.assertTrue(resume['dynamicWorkflowEnabled'])
+        self.assertEqual(resume['dynamicWorkflowMode'],'onDemand')
+        self.assertIn(self.SID,self.bridge.resident)
+
+    def test_messages_session_not_found_resumes_same_session(self):
+        expected={'messages':[message('m1')]}
+        self.client.outcomes=[session_not_found(self.SID),snapshot(),expected]
+        self.assertEqual(self.bridge.rpc('session/messages',{'sessionId':self.SID,'limit':5}),expected)
+        self.assertEqual(self.client.methods(),['session/messages','session/resume','session/messages'])
+
+    def test_events_runtime_not_ready_is_also_recovered(self):
+        expected={'events':[]}
+        self.client.outcomes=[runtime_not_ready(),snapshot(),expected]
+        self.assertEqual(self.bridge.rpc('session/events',{'sessionId':self.SID,'afterSeq':0}),expected)
+        self.assertEqual(self.client.methods(),['session/events','session/resume','session/events'])
+
+    def test_failed_retry_raises_original_error_and_does_not_loop(self):
+        original=runtime_not_ready()
+        self.client.outcomes=[original,snapshot(),runtime_not_ready()]
+        with self.assertRaises(ProtocolError) as caught:
+            self.bridge.rpc('session/read',{'sessionId':self.SID})
+        self.assertIs(caught.exception,original)
+        self.assertEqual(self.client.methods(),['session/read','session/resume','session/read'])
+
+    def test_failed_resume_keeps_original_error_and_skips_retry(self):
+        original=runtime_not_ready()
+        self.client.outcomes=[original,RuntimeError('resume failed')]
+        with self.assertRaises(ProtocolError) as caught:
+            self.bridge.rpc('session/read',{'sessionId':self.SID})
+        self.assertIs(caught.exception,original)
+        self.assertEqual(self.client.methods(),['session/read','session/resume'])
+        self.assertNotIn(self.SID,self.bridge.resident)
+
+    def test_send_and_control_rpcs_are_never_replayed(self):
+        for method in ('session/send','session/setMode','session/stop'):
+            error=runtime_not_ready()
+            self.client.outcomes=[error]
+            self.client.calls.clear()
+            with self.assertRaises(ProtocolError) as caught:
+                self.bridge.rpc(method,{'sessionId':self.SID,'content':'x'})
+            self.assertIs(caught.exception,error)
+            self.assertEqual(self.client.methods(),[method])
+
+    def test_other_protocol_errors_are_not_treated_as_recovery(self):
+        cases=[
+            ProtocolError({'code':-32001,'message':'Session runtime is not ready',
+                           'data':{'code':'runtimeNotReady'}}),
+            ProtocolError({'code':-32004,'message':'permission denied',
+                           'data':{'code':'permissionDenied'}}),
+            ProtocolError({'code':-32004,'message':'Session not found: sess_other'}),
+            ProtocolError({'code':-32004,'message':'Session not found'}),
+        ]
+        for error in cases:
+            with self.subTest(error=str(error)):
+                self.client.outcomes=[error]
+                self.client.calls.clear()
+                with self.assertRaises(ProtocolError) as caught:
+                    self.bridge.rpc('session/read',{'sessionId':self.SID})
+                self.assertIs(caught.exception,error)
+                self.assertEqual(self.client.methods(),['session/read'])
+
+    def test_unknown_session_is_not_hidden_resumed(self):
+        error=runtime_not_ready()
+        self.client.outcomes=[error]
+        with self.assertRaises(ProtocolError) as caught:
+            self.bridge.rpc('session/read',{'sessionId':'sess_unknown'})
+        self.assertIs(caught.exception,error)
+        self.assertEqual(self.client.methods(),['session/read'])
+
+    def test_read_session_tool_recovers_before_returning_final_report(self):
+        self.client.outcomes=[runtime_not_ready(),snapshot(),snapshot(),
+                              {'messages':[message('m1','final')]}]
+        result=self.bridge.call('zcode_read_session',
+            {'session_id':self.SID,'caller_permission_mode':'full_access'})
+        self.assertEqual(self.client.methods(),
+            ['session/read','session/resume','session/read','session/messages'])
+        self.assertEqual([m['id'] for m in result['messages']],['m1'])
+
+    def test_resume_does_not_block_engine_interaction_callbacks(self):
+        state={}
+        def resume(method,params):
+            def callback():
+                self.bridge._request({'id':'wire-1','method':'interaction/requestUserInput',
+                    'params':{'requestId':'req-1','sessionId':self.SID,'toolCallId':'call-1',
+                              'toolName':'AskUserQuestion',
+                              'input':{'questions':[{'question':'Test?'}]}}})
+            worker=threading.Thread(target=callback)
+            worker.start()
+            worker.join(timeout=2)
+            state['blocked']=worker.is_alive()
+            return snapshot()
+        self.client.outcomes=[runtime_not_ready(),resume,snapshot()]
+        self.bridge.rpc('session/read',{'sessionId':self.SID})
+        self.assertFalse(state.get('blocked'),'interaction callback blocked during resume')
+        self.assertIn('req-1',self.bridge.pending)
+
+
+class RoutedEngineClient:
+    """Engine double for the whole notify-send path; Bridge.rpc stays real."""
+
+    def __init__(self):
+        self.calls=[]
+        self.child=Mock()
+        self.child.poll.return_value=None
+        self.child.pid=4242
+        self.status='idle'
+        self.turn_count=0
+        self.jobs=[]
+        self.runs=[]
+        self.messages=[]
+        self.child_ids=[]
+        self.subagents_error=None
+        self.send_result={'accepted':True,'messageId':'m-sent'}
+
+    def request(self,method,params=None,timeout=40):
+        params=params or {}
+        self.calls.append((method,copy.deepcopy(params)))
+        if method in ('session/read','session/resume'):
+            return {'session':{'sessionId':params.get('sessionId')},
+                'projection':{'status':self.status,'turnCount':self.turn_count,
+                              'backgroundJobs':copy.deepcopy(self.jobs)},
+                'messages':copy.deepcopy(self.messages),
+                'runtime':{},
+                'settings':{'permission':{'mode':'yolo'},
+                            'model':{'current':{'providerId':'p','modelId':'m'}},
+                            'thoughtLevel':{'current':'high'}}}
+        if method=='session/setMode':
+            mode='build' if params.get('mode')=='plan' else params.get('mode')
+            return {'settings':{'permission':{'mode':mode},
+                                'model':{'current':{'providerId':'p','modelId':'m'}},
+                                'thoughtLevel':{'current':'high'}}}
+        if method=='session/messages':
+            return {'messages':copy.deepcopy(self.messages)}
+        if method=='v4/conversation/workflowRuns':
+            return {'runs':copy.deepcopy(self.runs)}
+        if method=='v4/conversation/workflowRunEvents':
+            return {'events':[],'hasMore':False}
+        if method=='session/subagents':
+            if self.subagents_error is not None:
+                raise self.subagents_error
+            return {'childSessionIds':list(self.child_ids)}
+        if method=='session/send':
+            return copy.deepcopy(self.send_result)
+        return {}
+
+    def respond(self,*args,**kwargs):
+        pass
+
+    def methods(self):
+        return [name for name,_ in self.calls]
+
+
+class FreshSessionSendTests(unittest.TestCase):
+    """session/subagents needs a persisted parent; only the first send may skip."""
+
+    SID='sess_fresh'
+    CTX={'thread_id':'chat-1','thread_origin':'turn_metadata'}
+
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory()
+        self.env=patch.dict(os.environ,{'ZCODE_BRIDGE_STATE':self.tmp.name})
+        self.env.start()
+        executable=Path(self.tmp.name)/'ZCode.exe'
+        executable.touch()
+        self.cfg=patch('zcode_bridge.service.config', return_value={**storage.defaults(),
+            'zcode_executable':str(executable),'auto_launch_desktop':False,
+            'default_model':{'providerId':'p','modelId':'m'},'default_thought_level':'high',
+            'default_workspace':self.tmp.name})
+        self.cfg.start()
+        self.bridge=Bridge()
+        self.engine=RoutedEngineClient()
+        self.bridge.client=self.engine
+        self.bridge.generation=1
+        self.bridge.capabilities_generation=1
+        self.bridge.resident.add(self.SID)
+        self.bridge._mark_created(self.SID)
+
+    def tearDown(self):
+        self.cfg.stop()
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def args(self,**overrides):
+        row={'session_id':self.SID,'content':'do the task',
+             'caller_permission_mode':'full_access',
+             'notify':{'completion_notify':True,'auto_continue':False,
+                       'user_authorized':True},
+             'idempotency_key':'key-1'}
+        row.update(overrides)
+        return row
+
+    def test_fresh_unstarted_first_notify_send_reaches_send_once(self):
+        self.engine.subagents_error=session_not_found(self.SID)
+        result=self.bridge.call('zcode_send',self.args(),self.CTX)
+        self.assertTrue(result['accepted'])
+        methods=self.engine.methods()
+        self.assertEqual(methods.count('session/send'),1)
+        self.assertNotIn('session/resume',methods)
+        self.assertLess(methods.index('session/subagents'),methods.index('session/send'))
+        sub=self.bridge.notifications.find_subscription(result['subscription_id'])
+        self.assertEqual(sub['state'],'armed')
+        self.assertEqual(sub['baseline']['child_ids'],[])
+        self.assertEqual(self.bridge.notifications.all_events(),[])
+
+    def test_existing_turn_keeps_not_found_strict_and_never_sends(self):
+        self.engine.turn_count=1
+        error=session_not_found(self.SID)
+        self.engine.subagents_error=error
+        with self.assertRaises(ProtocolError) as caught:
+            self.bridge.call('zcode_send',self.args(),self.CTX)
+        self.assertIs(caught.exception,error)
+        self.assertNotIn('session/send',self.engine.methods())
+        self.assertEqual(self.bridge.notifications.all_subscriptions(),[])
+
+    def test_active_background_is_not_exempted_by_not_found(self):
+        cases=(([{'jobId':'job-1','status':'running'}],[]),
+               ([],[{'runId':'run-1','status':'running'}]))
+        for jobs,runs in cases:
+            with self.subTest(jobs=jobs,runs=runs):
+                self.engine.calls.clear()
+                self.engine.jobs=jobs
+                self.engine.runs=runs
+                self.engine.subagents_error=session_not_found(self.SID)
+                with self.assertRaisesRegex(ValueError,'session_busy_untracked'):
+                    self.bridge.call('zcode_send',self.args(idempotency_key='key-bg'),
+                                     self.CTX)
+                self.assertNotIn('session/send',self.engine.methods())
+                self.assertEqual(self.bridge.notifications.all_subscriptions(),[])
+
+    def test_resumed_zero_turn_session_is_not_exempted(self):
+        self.bridge.created.discard(self.SID)
+        error=session_not_found(self.SID)
+        self.engine.subagents_error=error
+        with self.assertRaises(ProtocolError) as caught:
+            self.bridge.call('zcode_send',self.args(),self.CTX)
+        self.assertIs(caught.exception,error)
+        self.assertNotIn('session/send',self.engine.methods())
+
+    def test_visible_user_input_blocks_the_gap_exemption(self):
+        self.engine.messages=[message('m-user','already sent',role='user')]
+        error=session_not_found(self.SID)
+        self.engine.subagents_error=error
+        with self.assertRaises(ProtocolError) as caught:
+            self.bridge.call('zcode_send',self.args(),self.CTX)
+        self.assertIs(caught.exception,error)
+        self.assertNotIn('session/send',self.engine.methods())
+
+    def test_fresh_session_non_target_errors_stay_strict(self):
+        cases=(
+            ProtocolError({'code':-32004,'message':'Session runtime is not ready',
+                           'data':{'code':'runtimeNotReady'}}),
+            ProtocolError({'code':-32001,'message':f'Session not found: {self.SID}'}),
+            RuntimeError('subagents unavailable'),
+        )
+        for error in cases:
+            with self.subTest(error=str(error)):
+                self.engine.calls.clear()
+                self.engine.subagents_error=error
+                with self.assertRaises(type(error)) as caught:
+                    self.bridge.call('zcode_send',self.args(idempotency_key='key-err'),
+                                     self.CTX)
+                self.assertIs(caught.exception,error)
+                self.assertNotIn('session/send',self.engine.methods())
+
+    def test_baseline_gap_requires_a_clean_unstarted_projection(self):
+        self.engine.subagents_error=session_not_found(self.SID)
+        clean={'session':{'sessionId':self.SID},
+               'projection':{'status':'idle','turnCount':0,'backgroundJobs':[]},
+               'messages':[]}
+        baseline=self.bridge._baseline(self.SID,clean,run_rows=[],strict=True,
+                                       allow_unstarted_children=True)
+        self.assertEqual(baseline['child_ids'],[])
+        blocked=[
+            {'session':{'sessionId':self.SID},
+             'projection':{'status':'idle','turnCount':0,'currentTurnId':'turn-1',
+                           'backgroundJobs':[]}},
+            {'session':{'sessionId':self.SID},
+             'projection':{'status':'idle','turnCount':1,'backgroundJobs':[]}},
+            {'session':{'sessionId':self.SID},
+             'projection':{'status':'idle','turnCount':0,
+                           'backgroundJobs':[{'jobId':'j','status':'running'}]}},
+            {'session':{'sessionId':self.SID},
+             'projection':{'status':'idle','turnCount':0,'backgroundJobs':[]},
+             'messages':[message('m-user','sent',role='user')]},
+        ]
+        for snap in blocked:
+            with self.subTest(snap=snap):
+                with self.assertRaises(ProtocolError):
+                    self.bridge._baseline(self.SID,snap,run_rows=[],strict=True,
+                                          allow_unstarted_children=True)
+        with self.assertRaises(ProtocolError):
+            self.bridge._baseline(self.SID,clean,strict=True,
+                                  run_rows=[{'run_id':'run-1','settled':False}],
+                                  allow_unstarted_children=True)
 
 
 if __name__=='__main__': unittest.main()

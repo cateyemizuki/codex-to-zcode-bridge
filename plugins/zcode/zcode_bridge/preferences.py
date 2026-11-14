@@ -1,6 +1,7 @@
 """OpenAI structured settings: native plugin controls, no skill invocation."""
 import copy
 from .transport import local_call
+from .storage import NOTIFY_RANGES
 
 READ_TOOL = 'zcode_preferences_read'
 UPDATE_TOOL = 'zcode_preferences_update'
@@ -8,6 +9,15 @@ CAPABILITY = {'readTool':READ_TOOL, 'updateTool':UPDATE_TOOL}
 PATH_TITLES = {'zcode_executable':'ZCode 程序','engine_entry':'ZCode 引擎',
     'node_executable':'Node 程序（留空时自动查找）', 'builtin_provider_file':'内置模型配置文件',
     'personal_provider_file':'个人模型配置文件'}
+NOTIFY_TITLES = {
+    'completion_notify_poll_seconds':'通知轮询间隔（秒）',
+    'completion_notify_start_timeout_seconds':'轮次启动等待上限（秒）',
+    'completion_notify_expiry_hours':'订阅过期时间（小时）',
+    'completion_notify_wake_attempts':'宿主唤醒最大尝试次数',
+}
+NOTIFY_DEFAULTS = {'completion_notify_poll_seconds':1,
+    'completion_notify_start_timeout_seconds':120,
+    'completion_notify_expiry_hours':6,'completion_notify_wake_attempts':5}
 
 
 def catalogue():
@@ -42,6 +52,8 @@ def effective_values(cfg, choices):
 def read():
     cfg, choices = catalogue()
     values = effective_values(cfg, choices)
+    for key in NOTIFY_TITLES:
+        values.setdefault(key, cfg.get(key, NOTIFY_DEFAULTS[key]))
     options = list(choices)
     if values['default_model'] not in options:
         options.append(values['default_model'])
@@ -57,10 +69,16 @@ def read():
         'default_workflow_mode':{'type':'string','title':'动态工作流模式','enum':['onDemand','alwaysOn','disabled']},
         'auto_launch_desktop':{'type':'boolean','title':'ZCode 未运行时自动启动'},
         **{key:{'type':'string','title':title} for key,title in PATH_TITLES.items()},
+        **{key:{'type':'integer','title':title,'minimum':NOTIFY_RANGES[key][0],
+                'maximum':NOTIFY_RANGES[key][1]} for key,title in NOTIFY_TITLES.items()},
     }
+    # Native settings expose schema properties only.  No global wake/auto-continue
+    # authorization key exists here.
+    values = {key: values[key] for key in properties if key in values}
     return {'schema':{'type':'object','properties':properties},'values':values,'layout':[
         {'kind':'group','title':'模型与工作区','items':[{'kind':'property','property':key} for key in
             ('default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop')]},
+        {'kind':'group','title':'完成通知（运营参数）','items':[{'kind':'property','property':key} for key in NOTIFY_TITLES]},
         {'kind':'group','title':'配置与会话面板','items':[{'kind':'tool','tool':'zcode_open_settings'}]},
         {'kind':'group','title':'本机程序路径','items':[{'kind':'property','property':key} for key in PATH_TITLES]},
     ]}
@@ -71,12 +89,19 @@ def update(arguments):
     if not isinstance(changes,dict) or not changes:
         raise ValueError('set 必须包含要更新的配置项')
     cfg, choices = catalogue()
-    allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop',*PATH_TITLES}
+    allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop',*PATH_TITLES,*NOTIFY_TITLES}
     if set(changes)-allowed:
         raise ValueError('未知配置项')
     changes = copy.deepcopy(changes)
     for key,value in changes.items():
-        if (key=='auto_launch_desktop' and type(value) is not bool) or (key!='auto_launch_desktop' and not isinstance(value,str)):
+        if key == 'auto_launch_desktop':
+            if type(value) is not bool:
+                raise ValueError('配置值类型错误：'+key)
+        elif key in NOTIFY_RANGES:
+            low, high = NOTIFY_RANGES[key]
+            if type(value) is not int or not low <= value <= high:
+                raise ValueError('通知参数超出范围：'+key)
+        elif not isinstance(value,str):
             raise ValueError('配置值类型错误：'+key)
     row = None
     if 'default_model' in changes:
@@ -104,7 +129,9 @@ def update(arguments):
 def definitions():
     types = {'default_workspace':{'type':'string'},'default_model':{'type':'string'},
         'default_thought_level':{'type':'string'},'default_workflow_mode':{'type':'string','enum':['onDemand','alwaysOn','disabled']},
-        'auto_launch_desktop':{'type':'boolean'},**{k:{'type':'string'} for k in PATH_TITLES}}
+        'auto_launch_desktop':{'type':'boolean'},**{k:{'type':'string'} for k in PATH_TITLES},
+        **{key:{'type':'integer','minimum':NOTIFY_RANGES[key][0],
+                'maximum':NOTIFY_RANGES[key][1]} for key in NOTIFY_TITLES}}
     meta = {'ui':{'visibility':['app']},'openai/widgetAccessible':True}
     return [
         {'name':READ_TOOL,'title':'读取插件设置','description':'Read native ChatGPT/Codex plugin settings schema, values and layout.',

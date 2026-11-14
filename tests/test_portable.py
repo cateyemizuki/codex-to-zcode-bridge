@@ -87,8 +87,8 @@ class PortableTests(unittest.TestCase):
             cwd=base,env=env,capture_output=True,text=True,encoding='utf-8',timeout=20)
         self.assertEqual(process.returncode,0,process.stderr)
         replies={r['id']:r for r in map(json.loads,process.stdout.splitlines())}
-        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.3.0')
-        self.assertEqual(len(replies[2]['result']['tools']),21)
+        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.4.0')
+        self.assertEqual(len(replies[2]['result']['tools']),28)
         self.assertIn('默认主代理模型',replies[3]['result']['contents'][0]['text'])
         self.assertFalse((state/'connection.json').exists(),'MCP discovery must not start an engine')
         if host=='zcode':
@@ -98,7 +98,7 @@ class PortableTests(unittest.TestCase):
                 cwd=base,env=env,capture_output=True,text=True,encoding='utf-8',timeout=20)
             self.assertEqual(direct.returncode,0,direct.stderr)
             messages={r['id']:r for r in map(json.loads,direct.stdout.splitlines())}
-            self.assertEqual(len(messages[2]['result']['tools']),21)
+            self.assertEqual(len(messages[2]['result']['tools']),28)
 
     def test_codex_package_runs_after_relocation_and_installation(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -122,9 +122,35 @@ class PortableTests(unittest.TestCase):
             self.assertEqual(actual,expected)
 
     def test_release_audit_rejects_local_state(self):
-        self.assertTrue(inspect('sessions.json',b'{}'))
-        self.assertTrue(inspect('trace.log',b'example'))
+        for name in ('sessions.json','notifications.json','notifications.incompatible.abc.json',
+                     'host_capability.json','trace.log'):
+            self.assertTrue(inspect(name,b'{}'),name)
         self.assertFalse(inspect('README.md',b'Use your local configuration.'))
+
+    def test_build_output_is_lf_and_contains_notification_modules(self):
+        import build
+        with tempfile.TemporaryDirectory() as temporary:
+            stage=Path(temporary)/'stage'
+            build.build(stage)
+            for host in ('codex','zcode'):
+                package=stage/'plugins'/host/'zcode_bridge'
+                for module in ('notifications.py','delivery.py','host_wake.py'):
+                    self.assertTrue((package/module).is_file(),host+'/'+module)
+            offenders=[]
+            for path in stage.rglob('*'):
+                if path.is_file() and path.suffix in ('.json','.toml','.py','.html','.md'):
+                    if b'\r\n' in path.read_bytes():
+                        offenders.append(str(path.relative_to(stage)))
+            self.assertEqual(offenders,[])
+
+    def test_generated_packages_have_no_crlf_in_checked_in_tree(self):
+        offenders=[]
+        for prefix in ('plugins','.agents','.claude-plugin'):
+            for path in (ROOT/prefix).rglob('*'):
+                if path.is_file() and path.suffix in ('.json','.toml','.py','.html','.md'):
+                    if b'\r\n' in path.read_bytes():
+                        offenders.append(str(path.relative_to(ROOT)))
+        self.assertEqual(offenders,[])
 
 
 if __name__=='__main__':

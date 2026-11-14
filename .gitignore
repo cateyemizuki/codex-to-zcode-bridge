@@ -13,6 +13,11 @@ connection.json
 sessions.json
 installation.json
 verification*.json
+notifications.json
+notifications.*.json
+host_capability.json
+# Local client state (ZCode app databases/settings) is never release input.
+.zcode/
 *.log
 *.sqlite*
 backups/

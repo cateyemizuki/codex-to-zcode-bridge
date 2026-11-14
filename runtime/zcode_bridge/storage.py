@@ -47,7 +47,22 @@ def defaults():
         'default_model': {'providerId': os.environ.get('ZCODE_MODEL_PROVIDER', ''), 'modelId': os.environ.get('ZCODE_MODEL_ID', '')},
         'default_thought_level': 'auto', 'default_workflow_mode': 'onDemand',
         'auto_launch_desktop': os.name == 'nt',
+        # Completion-notification operations only.  There is deliberately no
+        # global "enable wake" or "enable auto continue" switch: each
+        # subscription must carry the current chat's explicit user_authorized.
+        'completion_notify_poll_seconds': 1,
+        'completion_notify_start_timeout_seconds': 120,
+        'completion_notify_expiry_hours': 6,
+        'completion_notify_wake_attempts': 5,
     }
+
+
+NOTIFY_RANGES = {
+    'completion_notify_poll_seconds': (1, 60),
+    'completion_notify_start_timeout_seconds': (10, 3600),
+    'completion_notify_expiry_hours': (1, 24),
+    'completion_notify_wake_attempts': (1, 20),
+}
 
 
 def config():
@@ -83,5 +98,9 @@ def _save_config(changes):
     model = result['default_model']
     if not isinstance(model, dict) or not all(isinstance(model.get(k), str) for k in ('providerId', 'modelId')) or bool(model.get('providerId')) != bool(model.get('modelId')):
         raise ValueError('默认模型无效')
+    for key, (low, high) in NOTIFY_RANGES.items():
+        value = result.get(key)
+        if type(value) is not int or not low <= value <= high:
+            raise ValueError('通知参数超出范围：' + key)
     write_json(state_dir() / 'config.json', result)
     return result

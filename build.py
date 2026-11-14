@@ -8,14 +8,14 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 MARKET = 'codex-to-zcode-bridge-plugins'
 REPOSITORY = 'https://github.com/cateyemizuki/codex-to-zcode-bridge'
 
 
 def write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2)+'\n', encoding='utf-8', newline='\n')
 
 
 def build(destination):
@@ -59,7 +59,7 @@ def build(destination):
             '[project]\nname = "codex-to-zcode-bridge"\nversion = "'+VERSION+'"\nrequires-python = ">=3.10"\n'
             'description = "Local ZCode MCP bridge"\nlicense = {file = "LICENSE"}\n\n'
             '[tool.setuptools.packages.find]\nwhere = ["."]\ninclude = ["zcode_bridge*"]\n\n'
-            '[tool.setuptools.package-data]\nzcode_bridge = ["ui/*.html"]\n', encoding='utf-8')
+            '[tool.setuptools.package-data]\nzcode_bridge = ["ui/*.html"]\n', encoding='utf-8', newline='\n')
     write(destination/'.agents/plugins/marketplace.json', {'name':MARKET,
         'interface':{'displayName':'Codex to ZCode Bridge'},'plugins':[{'name':'codex-to-zcode-bridge',
             'source':{'source':'local','path':'./plugins/codex'},
@@ -102,7 +102,7 @@ def main():
                     if path.is_file() and '__pycache__' not in path.parts and path.suffix!='.pyc':
                         archive.write(path, path.relative_to(ROOT/'plugins'/host))
         checksums = [hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name for p in sorted(dist.glob('*.zip'))]
-        (dist/'SHA256SUMS').write_text('\n'.join(checksums)+'\n',encoding='utf-8')
+        (dist/'SHA256SUMS').write_text('\n'.join(checksums)+'\n',encoding='utf-8',newline='\n')
     print('Built Codex/ChatGPT and ZCode plugins', VERSION)
 
 

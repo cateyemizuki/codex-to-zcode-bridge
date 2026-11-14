@@ -84,5 +84,43 @@ class NativeSettingsTests(unittest.TestCase):
         result=mcp.handle({'method':'tools/call','params':{'name':preferences.UPDATE_TOOL,'arguments':{'set':{'default_workflow_mode':'disabled'}}}})
         self.assertEqual(result['structuredContent']['values']['default_workflow_mode'],'disabled')
 
+    def test_notification_operating_parameters_are_visible_and_bounded(self):
+        result=preferences.read()
+        for key in preferences.NOTIFY_TITLES:
+            self.assertIn(key,result['schema']['properties'])
+            self.assertIn(key,result['values'])
+        self.assertEqual(result['values']['completion_notify_poll_seconds'],1)
+        updated=preferences.update({'set':{'completion_notify_wake_attempts':7}})
+        self.assertEqual(updated['values']['completion_notify_wake_attempts'],7)
+        for changes in ({'completion_notify_expiry_hours':25},
+                        {'completion_notify_poll_seconds':0},
+                        {'completion_notify_start_timeout_seconds':'120'}):
+            with self.assertRaises(ValueError): preferences.update({'set':changes})
+
+    def test_no_settings_key_can_grant_wake_or_auto_continue(self):
+        from zcode_bridge import storage
+        from zcode_bridge.tools import TOOLS
+        forbidden={'completion_notify_wake_enabled','completion_notify_auto_continue_enabled',
+                   'completion_notify_enabled'}
+        self.assertEqual(forbidden & set(storage.defaults()),set())
+        result=preferences.read()
+        self.assertEqual(forbidden & set(result['schema']['properties']),set())
+        with self.assertRaises(ValueError):
+            preferences.update({'set':{'completion_notify_wake_enabled':True}})
+        by_name={tool['name']:tool for tool in TOOLS}
+        subscribe=by_name['zcode_notify_subscribe']['inputSchema']
+        self.assertIn('user_authorized',subscribe['required'])
+        self.assertIn('caller_permission_mode',subscribe['required'])
+        notify=by_name['zcode_send']['inputSchema']['properties']['notify']
+        self.assertIn('user_authorized',notify['required'])
+
+    def test_panel_says_inbox_is_not_a_wake_and_cancel_stays_in_the_chat(self):
+        text=(Path(__file__).resolve().parents[1]/'runtime/zcode_bridge/ui/settings.html').read_text(encoding='utf-8')
+        self.assertIn('收件箱可拉取 ≠ 已唤醒模型',text)
+        self.assertIn('不提供取消按钮',text)
+        self.assertIn('zcode_notify_cancel',text)
+        for key in preferences.NOTIFY_TITLES.values():
+            self.assertIn(key,text)
+
 
 if __name__=='__main__': unittest.main()

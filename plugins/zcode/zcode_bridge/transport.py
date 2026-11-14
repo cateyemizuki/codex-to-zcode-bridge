@@ -20,13 +20,22 @@ from .storage import read_json, state_dir, write_json
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def local_call(name, arguments=None, timeout=55):
-    info = ensure_service()
-    data = json.dumps({'name': name, 'arguments': arguments or {}}, ensure_ascii=False).encode('utf-8')
+def local_call(name, arguments=None, context=None, timeout=55, budget_ms=None, meta=None):
+    context = context if context is not None else meta
+    deadline = time.monotonic() + max(1, timeout)
+    info = ensure_service(deadline)
+    body = {'name': name, 'arguments': arguments or {}}
+    if context is not None:
+        body['context'] = context
+    if budget_ms is not None:
+        body['budget_ms'] = int(budget_ms)
+    elif context is not None:
+        body['budget_ms'] = int(max(500, (deadline - time.monotonic()) * 1000))
+    data = json.dumps(body, ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(f"http://127.0.0.1:{info['port']}/call", data=data,
         headers={'Authorization': 'Bearer '+info['token'], 'Content-Type': 'application/json'})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=max(1, deadline - time.monotonic())) as response:
             result = json.load(response)
     except urllib.error.HTTPError as error:
         result = json.load(error)
@@ -47,7 +56,7 @@ def _healthy(info):
         return False
 
 
-def ensure_service():
+def ensure_service(deadline=None):
     path = state_dir() / 'connection.json'
     info = read_json(path)
     if _healthy(info):
@@ -57,8 +66,8 @@ def ensure_service():
         cwd=ROOT, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     log.close()
-    deadline = time.monotonic()+15
-    while time.monotonic() < deadline:
+    final = deadline if deadline is not None else time.monotonic() + 15
+    while time.monotonic() < final:
         info = read_json(path)
         if _healthy(info):
             return info
@@ -139,12 +148,22 @@ def serve():
                 if not 0 < size <= 2*1024*1024:
                     raise ValueError('request body size invalid')
                 request = json.loads(self.rfile.read(size))
+                context = request.get('context')
+                if not isinstance(context, dict):
+                    context = request.get('meta')
+                context = context if isinstance(context, dict) else None
+                budget_ms = request.get('budget_ms')
+                try:
+                    budget_ms = int(budget_ms) if budget_ms is not None else None
+                except (TypeError, ValueError):
+                    budget_ms = None
                 if request.get('name') == 'zcode_open_settings':
                     result = {'url': f'http://127.0.0.1:{self.server.server_port}/settings#'+token}
                     if request.get('arguments', {}).get('open_browser', True):
                         result['opened'] = webbrowser.open(result['url'])
                 else:
-                    result = bridge.call(request['name'], request.get('arguments', {}))
+                    result = bridge.call(request['name'], request.get('arguments', {}),
+                                         context, budget_ms)
                 self.respond({'ok': True, 'result': result})
             except Exception as error:
                 self.respond({'ok': False, 'error': str(error)}, 400)
@@ -152,9 +171,11 @@ def serve():
     server = Server(('127.0.0.1', 0), Handler)
     write_json(state_dir() / 'connection.json', {'pid': os.getpid(), 'port': server.server_port,
         'token': token, 'instance': instance, 'started_at': time.time()})
+    bridge.start_background()
     try:
         server.serve_forever(poll_interval=.25)
     finally:
+        bridge.stop_background()
         if bridge.client:
             bridge.client.close()
         server.server_close()

@@ -33,14 +33,14 @@ python install.py
 
 为子代理单独选模型和思考强度时，通常创建 `onDemand` 会话，发送 `/workflow` 自然语言任务，说明范围、阶段、并行、依赖、模型和验收。首次动态工作流授权仍须处理真实请求。
 
-桥接是独立引擎，桌面列表不会实时接收后续新会话通知；核心保存不等于界面已显示。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。
+桥接是独立引擎，桌面列表不会实时接收后续新会话或新消息；核心保存不等于界面已显示，`desktop.indexed` 也不等于侧栏当前可见。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。消息读取兼容 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；分页锚点不会因字段改名变成 null。
 
 ## 手动接入 MCP
 
 不使用安装器时，先准备本机 Python 服务，再使用标准 Codex 插件命令：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.3.0#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.3.1#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```

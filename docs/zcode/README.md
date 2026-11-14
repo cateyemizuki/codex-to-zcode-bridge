@@ -37,4 +37,4 @@ python install.py
 
 本机路径由安装器生成。直接通过 ZCode 市场安装时，宿主会解析插件根目录并启动包内服务，无需额外 pip 安装；需要保证宿主 PATH 中的 `python` 可用。
 
-完整项目和已知桌面同步限制：[GitHub 仓库](https://github.com/cateyemizuki/codex-to-zcode-bridge)。许可见本包 `LICENSE`。
+消息读取兼容 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；独立引擎仍不会向已打开的 Desktop 项目实时推送新会话或新消息，`desktop.indexed` 也不等于侧栏当前可见。完整项目和已知桌面同步限制：[GitHub 仓库](https://github.com/cateyemizuki/codex-to-zcode-bridge)。许可见本包 `LICENSE`。

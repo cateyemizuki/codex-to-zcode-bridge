@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- 消息读取兼容 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；`zcode_messages` 的 `after_message_id` 使用同一解析，不再因字段改名变成 null；两者都没有时保留调用方传入的 anchor，不伪造 ID。
+- `build.py` 写生成文件时显式使用 LF；修复 Windows 上 `build.py --check` 因 CRLF/LF 误报不一致的问题。
+- 明确实时 UI 限制：独立引擎仍不会向已打开的 Desktop 项目推送新会话或新消息；`desktop.indexed` 只表示索引收录，不等于侧栏当前可见。本版本不声称解决实时刷新。
+- 工具数量保持 21 项，未引入通知分支功能。
+
 ## 0.3.0
 
 - 从本机定制版整理为两个独立、可移动的分发包：GPT / Codex 侧与 ZCode 侧。

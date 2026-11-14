@@ -149,6 +149,34 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result['after_message_id'],'3')
         self.assertTrue(result['more'])
 
+    def test_forward_message_page_accepts_318_message_ids(self):
+        rows=[{'info':{'messageId':str(i),'role':'assistant'},'parts':[{'type':'text','text':'x'}]}
+            for i in range(1,8)]
+        self.bridge.rpc.return_value={'messages':rows}
+        result=self.bridge.call('zcode_messages',{'session_id':SID,'after_message_id':'0','limit':3})
+        self.assertEqual([m['id'] for m in result['messages']],['1','2','3'])
+        self.assertEqual(result['after_message_id'],'3')
+        self.assertTrue(result['more'])
+
+    def test_message_page_without_any_id_keeps_caller_anchor(self):
+        rows=[{'info':{'role':'assistant'},'parts':[{'type':'text','text':'x'}]} for _ in range(3)]
+        self.bridge.rpc.return_value={'messages':rows}
+        result=self.bridge.call('zcode_messages',{'session_id':SID,'after_message_id':'anchor-0','limit':3})
+        self.assertTrue(all(m['id'] is None for m in result['messages']))
+        self.assertEqual(result['after_message_id'],'anchor-0')
+
+    def test_message_identity_prefers_legacy_id(self):
+        row={'info':{'id':'legacy','messageId':'m318'},'parts':[]}
+        self.assertEqual(compact_messages([row])[0]['id'],'legacy')
+
+    def test_message_identity_accepts_318_shape(self):
+        row={'info':{'messageId':'m318','role':'assistant'},'parts':[]}
+        self.assertEqual(compact_messages([row])[0]['id'],'m318')
+
+    def test_message_identity_accepts_top_level_message_id(self):
+        row={'info':{'role':'assistant'},'messageId':'top','parts':[]}
+        self.assertEqual(compact_messages([row])[0]['id'],'top')
+
     def test_raw_transcript_is_available_explicitly(self):
         raw={'messages':[message('1',synthetic=True)]}
         self.bridge.rpc.return_value=raw

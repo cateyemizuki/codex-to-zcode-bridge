@@ -2,7 +2,7 @@
 
 让 ChatGPT / Codex 和其他支持本机 MCP 的 agent 工具调用本机 ZCode：选择已有模型、在指定工作区创建会话、派发任务、读取主代理和子代理结果、处理问题与授权，并使用 ZCode 的原生动态工作流。
 
-本仓库提供两个独立安装包，版本 **0.3.0**。它们共享同一份运行时代码和本机控制服务。
+本仓库提供两个独立安装包，版本 **0.3.1**。它们共享同一份运行时代码和本机控制服务。
 
 | 安装包 | 用途 | 说明 |
 | --- | --- | --- |
@@ -20,9 +20,14 @@
 - 按调用方当前权限设置 ZCode 会话；完全访问对应 `yolo`，只读会先降级基础权限再开启规划层。
 - 在 ZCode 未运行时按配置启动；通过原生设置或内嵌面板配置工作区、模型和程序路径。
 
+## 兼容性与已知限制
+
+- **消息 ID/分页**：同时接受 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；`after_message_id` 使用同一解析，不会因为字段改名变成 null。两者都没有时保留调用方 anchor，不伪造 ID。
+- **实时 UI**：独立引擎只负责核心会话持久化，不会向已打开的 Desktop 项目推送新会话或新消息；窗口 focus 只让侧栏重新读取桌面任务索引。`desktop.indexed` 只表示索引收录，不等于侧栏当前可见。本版本不声称解决实时列表/消息刷新。
+
 ## 安装前
 
-需要 Python 3.10+、Node.js、已安装并完成模型配置的 ZCode。GPT / Codex 安装器还需要可用的 `codex` CLI。运行时没有第三方 Python 依赖。实机集成基线为 Windows、ZCode Desktop 3.17.2 / engine 0.17.1、Python 3.12、Node.js 24；其他 ZCode 协议版本可能需要适配。
+需要 Python 3.10+、Node.js、已安装并完成模型配置的 ZCode。GPT / Codex 安装器还需要可用的 `codex` CLI。运行时没有第三方 Python 依赖。完整实机集成基线为 Windows、ZCode Desktop 3.17.2 / engine 0.17.1、Python 3.12、Node.js 24；0.3.1 新增对 Desktop 3.18.2 实际消息形状的兼容和分页回归，其他接口仍需按协议版本逐项验证。
 
 从 GitHub 直接安装 Python 服务包或克隆仓库还需要 Git；ZIP 安装器不要求先执行 pip 安装。
 
@@ -35,7 +40,7 @@
 本机已有 Python、Node 和 ZCode 时，先安装 MCP 服务的 Python 包，再用 Codex 命令注册市场和安装插件：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.3.0#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.3.1#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```
@@ -62,7 +67,7 @@ python install.py --target both --zcode-executable "<ZCode 可执行文件的绝
 
 ### 从 ZIP 安装
 
-在 Releases 下载 `codex-to-zcode-bridge-codex-0.3.0.zip` 或 `codex-to-zcode-bridge-zcode-0.3.0.zip`，解压后进入该目录，运行：
+在 Releases 下载 `codex-to-zcode-bridge-codex-0.3.1.zip` 或 `codex-to-zcode-bridge-zcode-0.3.1.zip`，解压后进入该目录，运行：
 
 ```powershell
 python install.py

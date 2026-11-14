@@ -29,6 +29,16 @@ def caller_mode(arguments):
     return PERMISSIONS[permission]
 
 
+def message_identity(message):
+    """Return a stable message id across ZCode 3.17 (info.id) and 3.18 (info.messageId)."""
+    info = message.get('info') if isinstance(message, dict) else None
+    info = info if isinstance(info, dict) else {}
+    candidates = [info.get('id'), info.get('messageId')]
+    if isinstance(message, dict):
+        candidates.extend([message.get('id'), message.get('messageId')])
+    return next((value for value in candidates if value not in (None, '')), None)
+
+
 def compact_messages(messages, limit_chars=24000):
     result, used = [], 0
     for message in messages:
@@ -60,7 +70,7 @@ def compact_messages(messages, limit_chars=24000):
                         tool.update(result=value[:take], truncated=len(value)>take)
                         used += min(take, len(value))
                 parts.append(tool)
-        result.append({'id': info.get('id', message.get('id', message.get('messageId'))), 'role': info.get('role', message.get('role')),
+        result.append({'id': message_identity(message), 'role': info.get('role', message.get('role')),
                        'parts': parts})
     return result
 
@@ -392,9 +402,10 @@ class Bridge:
                 return result
             all_rows = result.get('messages', [])
             rows = all_rows[:limit]
+            anchor = message_identity(rows[-1]) if rows else None
             return {'messages': compact_messages(rows, int(args.get('max_chars', 24000))),
                     'more': len(all_rows) > limit,
-                    'after_message_id': rows[-1].get('info', {}).get('id') if rows else args.get('after_message_id')}
+                    'after_message_id': anchor if anchor is not None else args.get('after_message_id')}
         if name == 'zcode_subagents':
             return self._subagents(sid, args)
         if name == 'zcode_set_model':

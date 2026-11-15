@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0 — 2026-11-15
+
+- 根代理独立完成 480 项回归和两侧 ZIP 隐私检查。实机验证原生实际编码任务结束后接回原 Codex chat、真实 AskUserQuestion → `zcode_agent_answer(CHECK-B)` → 同一页工具运行/最终输出、仅一次完成投递、真实 report-only MCP 调用以及 DWF 子代理运行中/完成内容读取；具体层级和未覆盖边界见 `docs/VALIDATION.md`。
+- 发送队列在副作用前原子持久 claim，未完成发送在重启后保留 uncertain，避免 crash 后重复投递；send admission 与不可信报告分开。Native 权限回答核对真实 pending 与选项，弱权限 allow 需显式批准，fullAccess 不能越过当前 caller grant，Host 与高层入口均校验，普通 AskUserQuestion 保持可用。
+- 修复 native 长会话提前结束分页和进度锚点停在首段：父/子消息使用有界 lookahead 判断真实 hasMore，游标分页保持请求页大小，最近消息与用户锚点取 ready snapshot 尾部；不能读取时保留诊断，不恢复旧引擎。发布扫描新增 JS/MJS/SQL 源码与大写扩展名。
+
+- 新增高层子代理控制面：`zcode_delegate` 一次创建、派发并可选原子订阅；`zcode_agent_message` 忙碌时有界持久队列；`zcode_agent_inspect` 聚合状态/verdict/pending/子代理/工作流/订阅/队列/事件/读取失败，并支持 owner-scoped `include_report`；`zcode_agent_answer` 只回答所属 agent 会话或已知子树的真实请求；`zcode_agent_cancel` 先按精确 taskId 调 `session/cancelBackgroundTask`、确认子树收敛后才取消；`zcode_agent_report` 保留有界结构化不可信载荷。旧 28 个工具保持兼容，MCP 工具总数 34（32 控制 + 2 原生设置）。
+- 降低重复手工协调：`zcode_agent_answer` 支持单题 `answer="实际选项 label/value"`，校验唯一真实选项后生成原生 `answers` 包装；多题/多选/自由文本/权限请求仍要求显式 `response`/`option_id`，冲突输入拒绝。`zcode_agent_report` 的 `session_id` 改为可选（agent_id 已绑定 job），返回真实 sender attribution，env fallback 不算验证身份。任务契约增加 DWF 子代理无 AskUserQuestion 时 `needs_input` 交主会话转交的约定。`zcode_agent_inspect`/job 摘要新增 `verification_scope=turn_lifecycle`、`task_success=null`、`task_review=needs_parent_review`，避免把生命周期完成当业务成功。
+- 新增可选 Desktop-owned native 后端：`zcode_create_session` / `zcode_delegate` 支持 `transport=engine|desktop_native`（或 profile/本机默认），每个 SID 持久绑定 backend，旧 SID 不按全局设置重判。`DesktopNativeAdapter` 复用私有 control 文件/loopback 鉴权/allowlist，原生 create/send/snapshot/messages/events/workflows/children/resolve/cancel；`native_messages` 直接数组、snapshot pending 真实 interaction、`native_pending` 只做写请求结果查询。默认关闭，失败明确返回 `unsupported`/`stale_owner`/`needs_native_ui`，不回退独立 engine、不打开/聚焦/重启、不自动恢复 foreign SID，token 不进入响应/日志/提示词。Native ACK 按真实形状归一化：首发 `status='accepted'+nativeAdmission.accepted` 与 V4 `status='accepted'/inputAccepted` 为 admission，replay/pending/unknown 保持 uncertain 且不重发；`native_children` 的 `childSessionIds/running/ended.items` 与 `native_workflow_events` 的 `{events,hasMore}` 已接；`stopped` 统一为取消终态而不是 pending/completed。Native 完成通知已接入 Observer/Delivery（per-SID identity/pending、实际 commandId 锚点、pending/后台/unknown 不完成）。仍不支持 background cancel、model setter 和 saved workflow catalog；native child 消息/快照经 owned parent + 真实 run（DWF）只读，child 写动作拒绝且 Host 拒绝不回退 engine；`projection.pendingPermissions` 中的 `AskUserQuestion` 按真实 `input.questions` 识别为 `requestUserInput` 并保留 requestId/toolCallId/input/reason/riskLevel。旧 engine `session/send` 不再传 Bridge 私有的 `caller_permission_mode`（3.18.2 会 -32602），已知 schema 拒绝映射为 failed/not_accepted 而不是 uncertain；未知写不自动重发。
+- 新增 `attach_report_mcp`（仅 engine）：在 `session/create` 的 `mcpServers` 中附加 session-local、只暴露 `zcode_agent_report` 的薄 MCP 入口（`python -m zcode_bridge.report_mcp`）；不改全局 registry，不自动 grant workspace trust，native host 无该参数时明确 unsupported。设置面板新增会话后端选择与状态（默认不变），文档区分旧同步与新的 Desktop-owned native 通道。
+- 新增持久 superagent 存储：稳定 `agent_id`/`job_id`、source thread 隔离、workspace/model/thought/permission 记录、自动幂等键、队列、cursor、最后可观测进展和连续读取失败计数；同 key 不重复派发/投递，`send_uncertain` 不自动重发。
+- Profile 按“显式参数→绑定 profile→真正配置的默认工作区”解析，使用真实 `zcode_models` catalog 校验模型与思考强度；拒绝未知模型/不支持强度；workspace 不再把发现层的 `Path.home()` 兜底当配置，并拒绝源码树 `plugins/` 与安装目录。任务契约 `superagent-contract-v1` 首次/修订完整、后续短引用，保留任务原文和 `/workflow` 首行。
+- 自动回传状态机区分 child `reported` 与桥接 `verified`；只有持久通知终态 `completed` 才 verified；新增 `action_required`、`send_uncertain`、`stalled`、`unobservable`；无订阅 job 也做节流诊断轮询，但不能据 idle 变成 verified，inspect 返回 `engine_idle_unverified`；同一 job 同一转移事件去重，普通进度不产生 job 事件；超时映射 `expired`，不静默成功。
+- pending 归属覆盖 job session、订阅已知子会话，并按需从 DWF 拓扑发现 actor；未知来源 report 只作为 unverified hint，载荷有界且仅 owner 可读，不宣告完成或授予权限，也不替代原生提问/权限通道。
+- 新增默认关闭的可选 `desktop_sync` 客户端适配器：只读私有 control 文件、allowlist 规范化、最多 50 个 session、异步按 workspace 节流合并；配置/token/endpoint 失败只记录状态，不影响业务；token 不进入响应、提示词、日志或仓库；不打开项目/抢焦点/重启实例。创建、输入、delegate、message、cancel 与终态均接入合并 sync。
+- 新增配置与可视化：`desktop_sync_enabled`、`desktop_sync_control_file`、`desktop_sync_min_interval_seconds`、`superagent_stall_seconds`、`superagent_read_failure_threshold`；storage 校验、原生设置和内嵌面板都已覆盖。
+- 新增真实入口：`scripts/superagent_live_check.py` 默认只 preflight/列模型，必须显式 `--workspace`、`--source-thread`、`--confirm-live` 才创建真实会话并执行 delegate→inspect→message→cancel；`--ask-roundtrip` 进一步验证真实 DWF 子端提问→inspect pending→`zcode_agent_answer`→继续；`scripts/desktop_sync_probe.py` 默认只做状态检查，sync 需要显式 `--confirm-sync`，不打开项目/不抢焦点。
+- 新增 `docs/SUPERAGENT.md` 操作审计表、状态机、profile/契约、Desktop 同步与未覆盖边界；操作审计改用稳定函数名而不是易漂移行号；Desktop shim 文档明确当前不是实时外来所有者传输，默认关闭并等待根代理 native host 契约合并。自动化测试增至 417 项。
+
 ## 0.4.0 — 2026-11-14
 
 - 修复通知观察器的真实接线，并以 3.18 原生轮次事件关联输入与消息；兼容对象和 JSON 字符串形式的来源 metadata，排除隐藏提醒及系统时间线造成的错误完成判定。

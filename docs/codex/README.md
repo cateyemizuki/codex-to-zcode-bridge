@@ -1,6 +1,6 @@
 # Codex to ZCode Bridge：GPT / Codex 侧
 
-本机 stdio MCP 插件，提供 26 项控制工具、2 项原生设置工具（共 28 项），以及内嵌配置面板。GPT 侧没有 skill，也不需要复制 ZCode 的完整工作流说明。
+本机 stdio MCP 插件，提供 32 项控制工具、2 项原生设置工具（共 34 项），以及内嵌配置面板。GPT 侧没有 skill，也不需要复制 ZCode 的完整工作流说明。推荐用 `zcode_delegate` 一次创建/派发/可选订阅，再用 `zcode_agent_message/inspect/answer/cancel` 跟进；旧 28 项工具保持兼容。
 
 ## 手动安装
 
@@ -36,7 +36,7 @@ python install.py
 
 为子代理单独选模型和思考强度时，通常创建 `onDemand` 会话，发送 `/workflow` 自然语言任务，说明范围、阶段、并行、依赖、模型和验收。首次动态工作流授权仍须处理真实请求。
 
-桥接是独立引擎，桌面列表不会实时接收后续新会话或新消息；核心保存不等于界面已显示，`desktop.indexed` 也不等于侧栏当前可见。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。消息读取兼容 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；分页锚点不会因字段改名变成 null。
+默认 `engine` 使用独立引擎，桌面列表不会实时接收后续新会话或新消息；核心保存和 `desktop.indexed` 不等于界面已显示。另行准备完整仓库提供的实验性 Host 复制件后，可在可视设置中选择 `desktop_native`、启用原生后端并填写本机 control 文件，让新任务由 Desktop 自己执行；3.18.2 已实测同一页问答、运行工具及最终输出。默认 ZIP 不自动修改 ZCode，不接管旧 SID；跨版本、setter、后台取消和 MCP 注入等边界见仓库原生模式说明。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。消息读取兼容 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`，长会话使用真实分页游标。
 
 ## 完成通知与续工
 
@@ -86,7 +86,7 @@ python install.py
 不使用安装器时，先准备本机 Python 服务，再使用标准 Codex 插件命令：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.4.0#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.0#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```

@@ -132,7 +132,8 @@ def _verdict(state, reason, notices=None):
 
 
 def _item_id(item):
-    for key in ('jobId', 'job_id', 'id', 'runId', 'run_id', 'sessionId', 'session_id'):
+    for key in ('jobId', 'job_id', 'taskId', 'task_id', 'id', 'runId', 'run_id',
+                'sessionId', 'session_id'):
         value = item.get(key)
         if value:
             return str(value)
@@ -145,7 +146,7 @@ def _job_state(item):
         return 'completed'
     if status in ('failed', 'error'):
         return 'failed'
-    if status in ('cancelled', 'canceled'):
+    if status in ('cancelled', 'canceled', 'stopped'):
         return 'cancelled'
     return status
 
@@ -158,7 +159,7 @@ def _run_state(item):
         return 'completed'
     if status in ('failed', 'error'):
         return 'failed'
-    if status in ('cancelled', 'canceled'):
+    if status in ('cancelled', 'canceled', 'stopped'):
         return 'cancelled'
     if status in ('queued', 'scheduled', 'pending', 'running', 'waiting', 'active'):
         return status
@@ -172,7 +173,7 @@ def _child_state(item):
                  or item.get('status') or '').lower()
     if status in ('completed', 'complete', 'idle', 'succeeded', 'success'):
         return 'completed'
-    if status in ('cancelled', 'canceled'):
+    if status in ('cancelled', 'canceled', 'stopped'):
         return 'cancelled'
     if status in ('error', 'failed'):
         return 'failed'
@@ -784,6 +785,29 @@ class NotificationStore:
                                                   or turn.get('send_result_message_id')
                                                   or turn.get('user_message_id'))
                                    else 'anchor_missing')
+            sub['updated_at'] = self.clock()
+            sub['revision'] = int(sub.get('revision') or 0) + 1
+            self._save()
+            return copy.deepcopy(sub)
+
+    def set_send_input_id(self, subscription_id, input_id):
+        """Replace the provisional send id with the native host's actual id.
+
+        The host generates its own ``commandId`` and uses it as the first-input
+        ``inputId``; arming before dispatch cannot know it.  The Observer only
+        anchors a turn when this id matches ``turn.started``/``turn.completed``.
+        """
+        value = str(input_id or '')
+        if not value:
+            return None
+        with self.lock:
+            sub = self._subscriptions().get(subscription_id)
+            if sub is None or sub.get('state') in TERMINAL_STATES:
+                return copy.deepcopy(sub) if sub is not None else None
+            turn = sub['turn']
+            turn['input_id'] = value
+            if not turn.get('turn_anchor'):
+                turn['turn_anchor'] = value
             sub['updated_at'] = self.clock()
             sub['revision'] = int(sub.get('revision') or 0) + 1
             self._save()
@@ -1695,8 +1719,25 @@ class Observer:
 
     def tick(self):
         now = self.clock()
+        # High-level delegations may have durable follow-ups queued behind a
+        # busy turn.  Drain only at a foreground-idle boundary; never invent a
+        # send or block the observer loop on a slow engine.
+        drain = getattr(self.runtime, 'drain_queues', None)
+        if callable(drain):
+            try:
+                drain(now)
+            except Exception:
+                pass
         for sub in self.due(now):
             self.observe(sub)
+        # The job state machine reads the already-persisted subscription truth.
+        # It must never invent completion from busy/idle/accepted.
+        sync = getattr(self.runtime, 'sync_jobs', None)
+        if callable(sync):
+            try:
+                sync(now)
+            except Exception:
+                pass
 
     def poll_once(self):
         """One explicit observation pass; used by tests and restart recovery."""
@@ -1733,11 +1774,13 @@ class Observer:
         # Wall clock is for evidence/expiry; RPC budgets use the monotonic clock.
         deadline = time.monotonic() + self.deadline_seconds
         sid = sub['session_id']
-        identity = self.runtime.engine_identity()
+        identity = self.runtime.engine_identity(sid)
         turn = sub.get('turn') or {}
         same_engine = ((turn.get('engine_pid') in (None, identity.get('pid')))
                        and (int(turn.get('generation') or 0) == int(identity.get('generation') or 0)))
-        evidence = {'now': now, 'engine_ok': False, 'pending': self.runtime.pending(),
+        pending_rows = (self.runtime.pending(sid)
+                        if callable(getattr(self.runtime, 'pending', None)) else [])
+        evidence = {'now': now, 'engine_ok': False, 'pending': pending_rows,
                     'pending_ttl': self.pending_ttl, 'poll_seconds': self.poll_seconds,
                     'engine_pid': identity.get('pid'), 'generation': identity.get('generation'),
                     'recovered': not same_engine,

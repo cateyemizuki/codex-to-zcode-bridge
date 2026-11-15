@@ -1,7 +1,7 @@
 """OpenAI structured settings: native plugin controls, no skill invocation."""
 import copy
 from .transport import local_call
-from .storage import NOTIFY_RANGES
+from .storage import NOTIFY_RANGES, SUPERAGENT_RANGES
 
 READ_TOOL = 'zcode_preferences_read'
 UPDATE_TOOL = 'zcode_preferences_update'
@@ -18,6 +18,29 @@ NOTIFY_TITLES = {
 NOTIFY_DEFAULTS = {'completion_notify_poll_seconds':1,
     'completion_notify_start_timeout_seconds':120,
     'completion_notify_expiry_hours':6,'completion_notify_wake_attempts':5}
+SUPERAGENT_TITLES = {
+    'superagent_stall_seconds':'无可观测进展判定（秒）',
+    'superagent_read_failure_threshold':'连续读取失败阈值',
+}
+DESKTOP_SYNC_TITLES = {
+    'desktop_sync_enabled':'启用 Desktop 同步（可选）',
+    'desktop_sync_control_file':'Desktop 同步私有控制文件',
+    'desktop_sync_min_interval_seconds':'Desktop 同步最小间隔（秒）',
+}
+NATIVE_TITLES = {
+    'default_transport':'会话后端',
+    'desktop_native_enabled':'启用桌面原生后端（实验）',
+    'desktop_native_control_file':'桌面原生私有控制文件',
+}
+
+
+def native_status():
+    try:
+        status = local_call('zcode_status')
+    except Exception:
+        return {}
+    value = status.get('native_transport') if isinstance(status, dict) else None
+    return value if isinstance(value, dict) else {}
 
 
 def catalogue():
@@ -54,12 +77,18 @@ def read():
     values = effective_values(cfg, choices)
     for key in NOTIFY_TITLES:
         values.setdefault(key, cfg.get(key, NOTIFY_DEFAULTS[key]))
+    for key, fallback in (('default_transport','engine'),
+                          ('desktop_native_enabled',False),
+                          ('desktop_native_control_file','')):
+        values.setdefault(key, cfg.get(key, fallback))
     options = list(choices)
     if values['default_model'] not in options:
         options.append(values['default_model'])
     levels = sorted({'auto'} | {level['value'] for row in choices.values() for level in row.get('reasoning',{}).get('levels',[])})
     if cfg['default_thought_level'] not in levels:
         levels.append(cfg['default_thought_level'])
+    native = native_status()
+    native_state = str(native.get('state') or 'unknown')
     properties = {
         'default_workspace':{'type':'string','title':'默认工作区','minLength':1},
         'default_model':{'type':'string','title':'默认主代理模型','enum':options,
@@ -71,6 +100,27 @@ def read():
         **{key:{'type':'string','title':title} for key,title in PATH_TITLES.items()},
         **{key:{'type':'integer','title':title,'minimum':NOTIFY_RANGES[key][0],
                 'maximum':NOTIFY_RANGES[key][1]} for key,title in NOTIFY_TITLES.items()},
+        **{key:{'type':'integer','title':title,'minimum':SUPERAGENT_RANGES[key][0],
+                'maximum':SUPERAGENT_RANGES[key][1]} for key,title in SUPERAGENT_TITLES.items()},
+        'desktop_sync_enabled':{'type':'boolean','title':DESKTOP_SYNC_TITLES['desktop_sync_enabled'],
+            'description':'默认关闭；只有显式开启并配置私有控制文件时才连接本机回环 sync。'},
+        'desktop_sync_control_file':{'type':'string',
+            'title':DESKTOP_SYNC_TITLES['desktop_sync_control_file'],
+            'description':'本机私有 control.json 路径；token 只由该文件读取，不进入设置值或工具响应。'},
+        'desktop_sync_min_interval_seconds':{'type':'integer',
+            'title':DESKTOP_SYNC_TITLES['desktop_sync_min_interval_seconds'],
+            'minimum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][0],
+            'maximum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][1]},
+        'default_transport':{'type':'string','title':NATIVE_TITLES['default_transport'],
+            'enum':['engine','desktop_native'],
+            'description':'独立引擎（默认，兼容旧工具）或桌面原生（实验）。'
+                          '当前桌面原生状态：'+native_state+'；选择后失败会明确报错，不会静默换回独立引擎。'},
+        'desktop_native_enabled':{'type':'boolean',
+            'title':NATIVE_TITLES['desktop_native_enabled'],
+            'description':'默认关闭。仅对显式选择 desktop_native 的新会话生效；不会自动打开项目或重启 Desktop。'},
+        'desktop_native_control_file':{'type':'string',
+            'title':NATIVE_TITLES['desktop_native_control_file'],
+            'description':'本机私有 control.json 路径；必须已启用 nativeTransport。token 不进入设置值或工具响应。'},
     }
     # Native settings expose schema properties only.  No global wake/auto-continue
     # authorization key exists here.
@@ -78,6 +128,12 @@ def read():
     return {'schema':{'type':'object','properties':properties},'values':values,'layout':[
         {'kind':'group','title':'模型与工作区','items':[{'kind':'property','property':key} for key in
             ('default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop')]},
+        {'kind':'group','title':'会话后端（桌面原生为实验）','items':[{'kind':'property','property':key} for key in
+            ('default_transport','desktop_native_enabled','desktop_native_control_file')]},
+        {'kind':'group','title':'Superagent 自动回传','items':[{'kind':'property','property':key} for key in
+            SUPERAGENT_TITLES]},
+        {'kind':'group','title':'Desktop 同步（可选）','items':[{'kind':'property','property':key} for key in
+            ('desktop_sync_enabled','desktop_sync_control_file','desktop_sync_min_interval_seconds')]},
         {'kind':'group','title':'完成通知（运营参数）','items':[{'kind':'property','property':key} for key in NOTIFY_TITLES]},
         {'kind':'group','title':'配置与会话面板','items':[{'kind':'tool','tool':'zcode_open_settings'}]},
         {'kind':'group','title':'本机程序路径','items':[{'kind':'property','property':key} for key in PATH_TITLES]},
@@ -89,18 +145,22 @@ def update(arguments):
     if not isinstance(changes,dict) or not changes:
         raise ValueError('set 必须包含要更新的配置项')
     cfg, choices = catalogue()
-    allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop',*PATH_TITLES,*NOTIFY_TITLES}
+    allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop',
+        *PATH_TITLES,*NOTIFY_TITLES,*SUPERAGENT_TITLES,*DESKTOP_SYNC_TITLES,*NATIVE_TITLES}
     if set(changes)-allowed:
         raise ValueError('未知配置项')
     changes = copy.deepcopy(changes)
     for key,value in changes.items():
-        if key == 'auto_launch_desktop':
+        if key in ('auto_launch_desktop','desktop_sync_enabled','desktop_native_enabled'):
             if type(value) is not bool:
                 raise ValueError('配置值类型错误：'+key)
-        elif key in NOTIFY_RANGES:
-            low, high = NOTIFY_RANGES[key]
+        elif key == 'default_transport':
+            if value not in ('engine','desktop_native'):
+                raise ValueError('会话后端无效：'+str(value))
+        elif key in NOTIFY_RANGES or key in SUPERAGENT_RANGES:
+            low, high = (NOTIFY_RANGES.get(key) or SUPERAGENT_RANGES[key])
             if type(value) is not int or not low <= value <= high:
-                raise ValueError('通知参数超出范围：'+key)
+                raise ValueError('参数超出范围：'+key)
         elif not isinstance(value,str):
             raise ValueError('配置值类型错误：'+key)
     row = None
@@ -123,15 +183,30 @@ def update(arguments):
     # This method is app-only and invoked by the native settings controls after
     # a person's edit. Model-driven updates still use zcode_settings + caller mode.
     saved = local_call('zcode_settings',{'changes':changes,'caller_permission_mode':'full_access'})
-    return {'values':effective_values(saved, choices)}
+    values = effective_values(saved, choices)
+    for key, fallback in (('default_transport','engine'),
+                          ('desktop_native_enabled',False),
+                          ('desktop_native_control_file','')):
+        values.setdefault(key, saved.get(key, fallback))
+    return {'values':values}
 
 
 def definitions():
     types = {'default_workspace':{'type':'string'},'default_model':{'type':'string'},
         'default_thought_level':{'type':'string'},'default_workflow_mode':{'type':'string','enum':['onDemand','alwaysOn','disabled']},
-        'auto_launch_desktop':{'type':'boolean'},**{k:{'type':'string'} for k in PATH_TITLES},
+        'auto_launch_desktop':{'type':'boolean'},'desktop_sync_enabled':{'type':'boolean'},
+        'desktop_sync_control_file':{'type':'string'},
+        'default_transport':{'type':'string','enum':['engine','desktop_native']},
+        'desktop_native_enabled':{'type':'boolean'},
+        'desktop_native_control_file':{'type':'string'},
+        **{k:{'type':'string'} for k in PATH_TITLES},
         **{key:{'type':'integer','minimum':NOTIFY_RANGES[key][0],
-                'maximum':NOTIFY_RANGES[key][1]} for key in NOTIFY_TITLES}}
+                'maximum':NOTIFY_RANGES[key][1]} for key in NOTIFY_TITLES},
+        **{key:{'type':'integer','minimum':SUPERAGENT_RANGES[key][0],
+                'maximum':SUPERAGENT_RANGES[key][1]} for key in SUPERAGENT_TITLES},
+        'desktop_sync_min_interval_seconds':{'type':'integer',
+            'minimum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][0],
+            'maximum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][1]}}
     meta = {'ui':{'visibility':['app']},'openai/widgetAccessible':True}
     return [
         {'name':READ_TOOL,'title':'读取插件设置','description':'Read native ChatGPT/Codex plugin settings schema, values and layout.',

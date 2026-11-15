@@ -27,6 +27,8 @@ import threading
 import time
 from pathlib import Path
 
+from . import __version__
+
 WAKE_TOOL = 'send_message_to_thread'
 
 
@@ -124,7 +126,7 @@ class HostSession:
         result = self.request('initialize', {
             'protocolVersion': protocol_version,
             'capabilities': {},
-            'clientInfo': {'name': 'codex-to-zcode-bridge', 'version': '0.4.0'},
+            'clientInfo': {'name': 'codex-to-zcode-bridge', 'version': __version__},
         })
         self.notify('notifications/initialized')
         return result

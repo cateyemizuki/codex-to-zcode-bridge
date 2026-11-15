@@ -54,10 +54,10 @@ def observation(clock, **overrides):
 
 def running_subscription(store, *, thread=THREAD, anchor='m1', before='m0',
                          engine_pid=111, consent_row=None, state='running',
-                         send_result=True, sid=SID, **overrides):
+                         send_result=True, sid=SID, input_id='inp-1', **overrides):
     sub = store.create_subscription(
         sid, source(thread), consent_row or consent(), state=state,
-        arm_basis='send_accepted', input_id='inp-1', before_message_id=before,
+        arm_basis='send_accepted', input_id=input_id, before_message_id=before,
         turn_anchor=anchor, anchor_proof='send_result_message', before_turn_count=0,
         engine_pid=engine_pid, **overrides)
     sub = store.mark_send_accepted(sub['subscription_id'],
@@ -109,7 +109,7 @@ class FakeRuntime:
         if self.fail == name:
             raise RuntimeError('fake engine unavailable')
 
-    def engine_identity(self):
+    def engine_identity(self, sid=None):
         self._guard('identity')
         return {'pid': self.pid, 'generation': self.generation}
 
@@ -152,7 +152,7 @@ class FakeRuntime:
         self._guard('stream_id')
         return self.stream
 
-    def pending(self):
+    def pending(self, sid=None):
         self._guard('pending')
         return copy.deepcopy(self.pending_rows)
 
@@ -696,6 +696,78 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.store._events()[event['event_id']]['delivery']['state'],
                          'expired')
         self.assertEqual(self.store.due_deliveries(self.clock.value), [])
+
+
+class FakeNativeRuntime(FakeRuntime):
+    """Native-owned facts only; any independent-engine shape is absent."""
+
+    def __init__(self, clock, input_id='native-cmd-1'):
+        super().__init__(clock, pid=None, stream='native:rt:1')
+        self.input_id = input_id
+        self.projection = {'status': 'running', 'turnCount': 1, 'backgroundJobs': []}
+        self.event_rows = [{'seq': 1, 'type': 'turn.started',
+                            'payload': {'inputId': input_id, 'messageId': 'm-user'}}]
+        self.message_rows = [
+            {'info': {'id': 'm-user', 'role': 'user', 'time': 1001},
+             'parts': [{'type': 'text', 'text': 'native input'}]},
+            {'info': {'id': 'm-assistant', 'role': 'assistant', 'time': 1002},
+             'parts': [{'type': 'text', 'text': 'NATIVE_CORE_DONE'}]},
+        ]
+
+    def engine_identity(self, sid=None):
+        return {'pid': None, 'generation': 1, 'identity': 'native-rt',
+                'transport': 'desktop_native'}
+
+    def pending(self, sid=None):
+        return copy.deepcopy(self.pending_rows)
+
+    def finish(self):
+        self.projection['status'] = 'idle'
+        self.event_rows.append({'seq': 2, 'type': 'turn.completed',
+                                'payload': {'inputId': self.input_id}})
+
+
+class NativeObserverTests(ObserverHarness):
+    def native_arm(self):
+        self.runtime = FakeNativeRuntime(self.clock)
+        self.observer = Observer(self.store, self.runtime, clock=self.clock,
+                                 poll_seconds=1)
+        return running_subscription(self.store, anchor='m-user', before='',
+                                    engine_pid=None, state='armed',
+                                    input_id='native-cmd-1')
+
+    def test_native_running_final_idle_emits_one_completion(self):
+        self.native_arm()
+        self.tick()
+        self.assertEqual(events_of(self.store, 'turn.completed'), [])
+        self.runtime.finish()
+        self.tick()
+        self.tick()
+        completed = events_of(self.store, 'turn.completed')
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]['kind'], 'turn.completed')
+        self.assertEqual(completed[0]['session_id'], SID)
+
+    def test_native_pending_or_background_never_completes(self):
+        self.native_arm()
+        self.runtime.finish()
+        self.runtime.pending_rows = [{'id': 'q-native', 'method': 'interaction/requestUserInput',
+                                      'params': {'sessionId': SID},
+                                      'received_at': self.clock.value}]
+        self.tick()
+        self.assertEqual(events_of(self.store, 'turn.completed'), [])
+        self.runtime.pending_rows = []
+        self.runtime.projection['backgroundJobs'] = [
+            {'jobId': 'native-job', 'status': 'running'}]
+        self.tick()
+        self.assertEqual(events_of(self.store, 'turn.completed'), [])
+
+    def test_native_unknown_or_read_error_never_completes(self):
+        self.native_arm()
+        self.runtime.finish()
+        self.runtime.fail = 'snapshot'
+        self.tick()
+        self.assertEqual(events_of(self.store, 'turn.completed'), [])
 
 
 if __name__ == '__main__':

@@ -2,7 +2,7 @@
 
 让 ChatGPT / Codex 和其他支持本机 MCP 的 agent 工具调用本机 ZCode：选择已有模型、在指定工作区创建会话、派发任务、读取主代理和子代理结果、处理问题与授权，并使用 ZCode 的原生动态工作流。任务完成后，桥接可以持久记录完成事件，并在版本支持的 Codex Desktop 上尝试唤醒原 chat 继续验收。
 
-本仓库提供两个独立安装包，版本 **0.4.0**。它们共享同一份运行时代码和本机控制服务。
+本仓库提供两个独立安装包，版本 **0.5.0**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。
 
 | 安装包 | 用途 | 说明 |
 | --- | --- | --- |
@@ -20,19 +20,36 @@
 - 读取并回答真实的问题与权限请求，包括首次动态工作流授权。
 - 按调用方当前权限设置 ZCode 会话；完全访问对应 `yolo`，只读会先降级基础权限再开启规划层。
 - 在 ZCode 未运行时按配置启动；通过原生设置或内嵌面板配置工作区、模型和程序路径。
+- 使用 `zcode_delegate` 一次创建、派发并可选订阅；用 `zcode_agent_message/inspect/answer/cancel` 跟进、聚合和取消，不必每次手工传全部环境。
+- 可选启用 Desktop 窄同步适配器，把创建/输入/终态异步合并后请求已配置的 allowlisted sync；默认关闭。
+
+## 高层子代理 API
+
+推荐从 `zcode_delegate` 开始；旧 28 个工具仍完全可用。
+
+| 工具 | 用途 |
+| --- | --- |
+| `zcode_delegate` | 一次创建 session + 派发任务 + 可选原子订阅；返回稳定 `agent_id`/`job_id`/`session_id`、解析后的 model/workspace、subscription、delivery 和 cursor |
+| `zcode_agent_message` | 忙碌时进入有界持久队列，空闲边界发送；返回 queued/delivered/uncertain；同 idempotency_key 不重复投递 |
+| `zcode_agent_inspect` | 紧凑查看 job 状态/verdict、最近消息 id、真实 pending request 与选项、subagents/workflows、订阅/队列/事件、desktop_sync 状态 |
+| `zcode_agent_answer` | 只回答该 agent 会话或已知子树中的真实 request；认证与真实用户偏好不代答 |
+| `zcode_agent_cancel` | 只取消该 job：独立 engine 精确取消所属后台任务，再停止前台；无法确认后台收敛时返回 pending。原生后端暂不支持后台取消 |
+| `zcode_agent_report` | 子端窄报告通道；只记录 unverified_hint，绝不据此宣告完成 |
+
+操作审计表、状态机、profile/契约和 Desktop 验收步骤见 [ZCode Superagent 操作审计](docs/SUPERAGENT.md)。
 
 ## 兼容性与已知限制
 
 - **消息 ID/分页**：同时接受 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；`after_message_id` 使用同一解析，不会因为字段改名变成 null。两者都没有时保留调用方 anchor，不伪造 ID。
-- **实时 UI**：独立引擎只负责核心会话持久化，不会向已打开的 Desktop 项目推送新会话或新消息；窗口 focus 只让侧栏重新读取桌面任务索引。`desktop.indexed` 只表示索引收录，不等于侧栏当前可见。本版本不声称解决实时列表/消息刷新。
+- **实时 UI**：默认独立引擎只负责核心会话持久化，不会向已打开的 Desktop 项目推送新会话或新消息；`desktop.indexed` 只表示索引收录。实验性的 `desktop_native` 后端让新任务由 Desktop 自己的引擎执行，已在 3.18.2 完整复制件上验证同一页问答、工具运行和最终输出，无需手工刷新。它需要另行安装版本/哈希门禁的 Host，不由默认插件自动启用，不能接管旧独立引擎 SID。见下方原生模式与 [实机验证](docs/VALIDATION.md)。
 
 ## 安装前
 
-需要 Python 3.10+、Node.js、已安装并完成模型配置的 ZCode。GPT / Codex 安装器还需要可用的 `codex` CLI。运行时没有第三方 Python 依赖。早期完整实机基线为 Windows、ZCode Desktop 3.17.2 / engine 0.17.1、Python 3.12、Node.js 24；0.3.1 验证了 Desktop 3.18.2 消息字段与分页，0.4.0 又在 3.18.2 上验证了真实模型任务的完成通知及同一 Codex Desktop 会话结束后的自动续工。宿主能力按运行时探测；其他版本需重新验证。详见 [验证记录](docs/VALIDATION.md)。
+需要 Python 3.10+、Node.js、已安装并完成模型配置的 ZCode。GPT / Codex 安装器还需要可用的 `codex` CLI。运行时没有第三方 Python 依赖。早期完整实机基线为 Windows、ZCode Desktop 3.17.2 / engine 0.17.1、Python 3.12、Node.js 24；0.3.1 验证了 Desktop 3.18.2 消息字段与分页，0.4.0 验证了真实模型任务的完成通知及同一 Codex Desktop 会话结束后的自动续工，0.5.0 增加高层子代理 API、自动回传状态机与可选 Desktop sync 适配器。宿主能力按运行时探测；其他版本需重新验证。详见 [验证记录](docs/VALIDATION.md)。
 
 从 GitHub 直接安装 Python 服务包或克隆仓库还需要 Git；ZIP 安装器不要求先执行 pip 安装。
 
-安装器会从环境、系统注册信息和常见安装位置寻找 ZCode，也可显式指定。默认工作区是当前用户目录；**不预设任何发布者模型编号**。安装后先读取模型并选择默认模型。
+安装器会从环境、系统注册信息和常见安装位置寻找 ZCode，也可显式指定。请配置实际项目工作区；高层派发不会把未配置的 home 兜底当作明确工作区。**不预设任何发布者模型编号**，安装后先读取模型并选择默认模型。
 
 ## 手动安装
 
@@ -41,7 +58,7 @@
 本机已有 Python、Node 和 ZCode 时，先安装 MCP 服务的 Python 包，再用 Codex 命令注册市场和安装插件：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.4.0#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.0#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```
@@ -68,7 +85,7 @@ python install.py --target both --zcode-executable "<ZCode 可执行文件的绝
 
 ### 从 ZIP 安装
 
-在 Releases 下载 `codex-to-zcode-bridge-codex-0.4.0.zip` 或 `codex-to-zcode-bridge-zcode-0.4.0.zip`，解压后进入该目录，运行：
+在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.0.zip` 或 `codex-to-zcode-bridge-zcode-0.5.0.zip`，解压后进入该目录，运行：
 
 ```powershell
 python install.py
@@ -131,9 +148,33 @@ python install.py --target both --no-register
 
 该能力不实现私有 pipe 协议，不修改 Codex 应用、二进制或数据库，也不使用 `codex queue --thread ... --resume` 假装续工。2026-11-14 已验证真实模型任务完成后，将结束本轮的来源 Codex Desktop 会话自动接回；两次实测各只投递一次。验证范围及版本边界见 [验证记录](docs/VALIDATION.md)。
 
+## 可选 Desktop 同步适配器
+
+0.5.0 提供一个默认关闭的客户端适配器，把创建、输入和终态事件异步合并后，按 workspace 节流调用已配置的私有 Desktop shim。它只读私有 `control.json`，只接受 `allowedWorkspaces` 中的路径，最多 50 个 session；配置/token/endpoint 不可用时只记录状态，不阻断派发。token 不进入工具响应、提示词、日志或仓库；适配器不打开项目、不抢焦点、不重启实例。
+
+配置项：`desktop_sync_enabled`、`desktop_sync_control_file`、`desktop_sync_min_interval_seconds`，以及诊断用的 `superagent_stall_seconds`、`superagent_read_failure_threshold`。原生设置和内嵌面板都可编辑。
+
+探针（默认只做本地状态检查；sync 需要显式确认）：
+
+```powershell
+python scripts/desktop_sync_probe.py --control <private>/control.json --op status
+python scripts/desktop_sync_probe.py --control <private>/control.json --op probe
+python scripts/desktop_sync_probe.py --control <private>/control.json --op sync --workspace <allowed-workspace> --session-id <session-id> --confirm-sync
+```
+
+完整的前置准备、GUI 肉眼验收步骤与预期见 [DESKTOP_SYNC_SHIM.md](docs/DESKTOP_SYNC_SHIM.md) 和 [SUPERAGENT.md](docs/SUPERAGENT.md)。
+
+## 实验性 Desktop 原生模式
+
+需要在 ZCode 页面中持续观察委派任务时，使用 `transport="desktop_native"` 创建新任务。先从完整仓库按 [Host 准备与回滚](docs/DESKTOP_SYNC_SHIM.md) 准备完整复制件，再按 [原生模式](docs/NATIVE_DESKTOP_TRANSPORT.md) 启用私有配置；在插件设置中选择 `desktop_native`、开启 `desktop_native_enabled` 并填写该机器的 `desktop_native_control_file`。默认 ZIP 只提供客户端适配器，不自动改动已安装的 ZCode，也不附带本地 token 或配置。
+
+该模式支持显式模型与强度创建、输入、快照/分页历史、真实问题回答、父会话与 DWF 子代理只读内容、完成事件和版本支持的宿主续工。新 SID 固定绑定该 Desktop 实例；关闭、替换实例或 runtime 不可用时给出诊断，不转到独立 engine。模型/模式 setter、后台任务取消、会话级 report MCP 注入等尚未提供，调用会明确返回不支持。两种后端的能力边界见 [Host 契约](docs/NATIVE_HOST_INTEGRATION.md)。
+
+0.5.0 的独立回归为 480 项（含 42 项 Node 行为用例）；实机已覆盖原生实际编码任务完成后接回原 Codex chat、真实问答往返及同一页延迟工具执行、report-only MCP 调用和 DWF 子代理内容读取。列表出现可能有被动延迟，创建成功仍不代表列表此刻已经可见。
+
 ## 已知边界
 
-- 桥接与桌面使用独立引擎连接。核心会话保存成功，不等于桌面列表已经显示；返回的 `desktop.indexed` 和 `workspace_registered` 会分别报告登记情况。
+- 默认 `engine` 与桌面使用独立引擎连接。核心会话保存成功，不等于桌面列表已经显示；返回的 `desktop.indexed` 和 `workspace_registered` 会分别报告登记情况。实验性 `desktop_native` 对新会话使用 Desktop 自己的引擎。
 - 首次打开对应工作区可导入已有会话。已经打开的项目不会实时收到独立引擎的新会话通知，重复打开也不能保证刷新。不要同时在两个引擎中操作同一运行中的会话。
 - 引擎进程仍在但 session runtime 已卸载时，只读的 `session/read`、`session/messages`、`session/events` 会对本桥接已加载/创建的同一 SID 做一次 native resume 后重试一次；发送、改模式、停止和回答不会重放，恢复失败保留原始错误。
 - 新建会话尚未开始首轮时引擎还没有 parent 行；只有本桥接本代创建、`turnCount=0`、idle 且无 workflow/job 的首个通知发送，才把 `session/subagents` 的精确 `Session not found: <SID>` 视为尚无子代理；已有轮次、活动后台、恢复或未知会话仍严格失败。
@@ -153,6 +194,8 @@ python -m unittest discover -s tests -q
 python build.py --check
 python scripts/audit_release.py
 python build.py --archives
+python scripts/superagent_live_check.py --workspace <existing-workspace>  # 预检，不建会话
+python scripts/superagent_live_check.py --workspace <existing-workspace> --source-thread <current-thread-id> --confirm-live
 ```
 
 `runtime/` 是唯一运行时代码来源。`plugins/codex` 与 `plugins/zcode` 是由 `build.py` 生成的独立插件，便于直接分发。修改运行时后重新生成两侧包，并提交生成结果。发布前的检查排除本地凭据、运行状态、数据库、个人路径、安装报告和历史会话。

@@ -14,7 +14,7 @@ agent 协助：将根 README 的安装提示词交给拥有本机文件和命令
 
 可选环境变量：`ZCODE_INSTALL_DIR`、`ZCODE_EXECUTABLE`、`ZCODE_ENGINE_ENTRY`、`ZCODE_NODE_EXECUTABLE`、`ZCODE_WORKSPACE`、`ZCODE_BUILTIN_PROVIDER_FILE`、`ZCODE_PERSONAL_PROVIDER_FILE`、`ZCODE_MODEL_PROVIDER`、`ZCODE_MODEL_ID`。它们是本机输入，不应放进 Git。
 
-默认状态目录是当前用户本地应用数据目录下的 `CateyeZCodeBridge`；其他平台使用当前用户的 `.local/share`。可用 `ZCODE_BRIDGE_STATE` 指定隔离状态目录。这个目录含连接令牌、会话记录、完成通知的订阅与事件，以及宿主启动上下文，应保留在本机。仓库根的 `.zcode/` 是本机客户端状态，已被忽略，不进入发布包或审计范围。
+默认状态目录是当前用户本地应用数据目录下的 `CateyeZCodeBridge`；其他平台使用当前用户的 `.local/share`。可用 `ZCODE_BRIDGE_STATE` 指定隔离状态目录。这个目录含连接令牌、会话记录、高层 job/队列状态 `superagent.json`、完成通知的订阅与事件，以及宿主启动上下文，应保留在本机。仓库根的 `.zcode/` 是本机客户端状态，已被忽略，不进入发布包或审计范围。
 
 模型鉴权由本机 ZCode 的模型配置提供。桥接只读取模型元数据，不把密钥作为工具结果返回，也不把 provider 文件复制到安装包。
 
@@ -30,6 +30,23 @@ agent 协助：将根 README 的安装提示词交给拥有本机文件和命令
 - `zcode_notify_inbox` 是权威读取路径。拉取收件箱不是唤醒；toast、MCP 日志、工具返回和 `delivered` 都不代表模型已读或已续工。
 
 完成通知的轮询间隔、轮次启动等待、订阅过期和唤醒尝试次数在原生设置或内嵌面板中调整，默认分别为 1 秒、120 秒、6 小时和 5 次。它们只影响观察和投递，不授予唤醒或自动续工权限；自动续工必须在单个订阅上显式授权。
+
+## 高层子代理与 Desktop 同步配置
+
+高层 `zcode_delegate`/`zcode_agent_message`/`zcode_agent_inspect`/`zcode_agent_answer`/`zcode_agent_cancel`/`zcode_agent_report` 使用本机 `superagent.json` 保存 job、队列、cursor、事件和连续读取失败计数；不要手工编辑该文件。旧 28 个工具仍兼容。
+
+以下配置在原生设置或内嵌面板中可见，也可用 `zcode_settings` 修改：
+
+- `superagent_profiles` / `superagent_default_profile`：可选 profile；模型和思考强度仍会用真实 catalog 校验。
+- `superagent_stall_seconds`：默认 600，范围 60–86400；长时间无可观测进展映射为 `stalled`。
+- `superagent_read_failure_threshold`：默认 5，范围 2–50；连续读取失败映射为 `unobservable`。
+- `desktop_sync_enabled`：默认 `false`；不会自动连接 Desktop。
+- `desktop_sync_control_file`：可选私有 `control.json` 路径，默认空；token 只从该文件读取，不进入设置值、工具响应、提示词或日志。
+- `desktop_sync_min_interval_seconds`：默认 5，范围 1–300；按 workspace 合并/节流。
+
+Desktop 同步的可选补丁工具不在默认插件包里，也不随安装器自动执行：`scripts/desktop_sync_copy.py`、`scripts/desktop_sync_shim.py`、`scripts/desktop_sync_probe.py` 和 `runtime/desktop_sync/` 只从仓库取得。需要时按 [DESKTOP_SYNC_SHIM.md](DESKTOP_SYNC_SHIM.md) 的版本/SHA-256 门禁复制隔离副本、生成私有 control 文件并显式启动；补丁工具保持可选，额外准备步骤和回滚步骤见该文档。探针默认只读，sync 需要 `--confirm-sync`，不打开项目、不抢焦点、不打印 token。
+
+真实最小往返入口：`python scripts/superagent_live_check.py --workspace <existing-workspace>` 只 preflight 与列模型；加 `--source-thread <thread>` 和 `--confirm-live` 才会执行 delegate → inspect → message → inspect → cancel。
 
 ## 手动注册与直接市场安装
 
@@ -59,7 +76,7 @@ ZCode 侧使用自己的市场命令。其宿主支持插件根目录变量，�
 
 ## 升级与移除
 
-从新版仓库或 ZIP 重新执行安装器。相同安装位置会先备份原插件再更新；已有配置与 provider 凭据保留。当前发布版本为 0.3.1；状态返回的 `bridge_version` 可用于确认实际运行版本，这不需要重启 ZCode 桌面。两侧使用同一个控制服务，升级不要强制结束正在运行的会话。已运行的旧控制服务可能仍使用旧代码；先等该服务管理的任务结束，再重新载入桥接服务。
+从新版仓库或 ZIP 重新执行安装器。相同安装位置会先备份原插件再更新；已有配置与 provider 凭据保留。当前发布版本为 0.5.0；状态返回的 `bridge_version` 可用于确认实际运行版本，这不需要重启 ZCode 桌面。两侧使用同一个控制服务，升级不要强制结束正在运行的会话。已运行的旧控制服务可能仍使用旧代码；先等该服务管理的任务结束，再重新载入桥接服务。
 
 升级到带完成通知的版本时，旧服务进程不会自动获得新的观察器和投递线程。重新载入桥接服务后：持久事件和订阅仍在，待送队列保留，宿主能力缓存清空；已确认或已投递的唤醒不会重放。新订阅会记录当前 chat 的授权；不要从旧版本或旧会话推断自动续工授权。若宿主管道在重启后变化，先重新探测，仍失败时在来源 chat 重新订阅。真实端到端唤醒仍需在真实 Codex Desktop chat 上验收。
 

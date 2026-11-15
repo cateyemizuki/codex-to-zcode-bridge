@@ -87,8 +87,8 @@ class PortableTests(unittest.TestCase):
             cwd=base,env=env,capture_output=True,text=True,encoding='utf-8',timeout=20)
         self.assertEqual(process.returncode,0,process.stderr)
         replies={r['id']:r for r in map(json.loads,process.stdout.splitlines())}
-        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.4.0')
-        self.assertEqual(len(replies[2]['result']['tools']),28)
+        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.5.0')
+        self.assertEqual(len(replies[2]['result']['tools']),34)
         self.assertIn('默认主代理模型',replies[3]['result']['contents'][0]['text'])
         self.assertFalse((state/'connection.json').exists(),'MCP discovery must not start an engine')
         if host=='zcode':
@@ -98,7 +98,7 @@ class PortableTests(unittest.TestCase):
                 cwd=base,env=env,capture_output=True,text=True,encoding='utf-8',timeout=20)
             self.assertEqual(direct.returncode,0,direct.stderr)
             messages={r['id']:r for r in map(json.loads,direct.stdout.splitlines())}
-            self.assertEqual(len(messages[2]['result']['tools']),28)
+            self.assertEqual(len(messages[2]['result']['tools']),34)
 
     def test_codex_package_runs_after_relocation_and_installation(self):
         with tempfile.TemporaryDirectory() as temporary:

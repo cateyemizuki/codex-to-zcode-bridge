@@ -26,7 +26,7 @@ def inspect(name, data):
             or (p.name.startswith('notifications.') and p.suffix == '.json')
             or p.suffix in ('.pyc','.log','.sqlite','.db','.bak') or '__pycache__' in p.parts):
         errors.append(name+': local state or backup file')
-    if p.suffix in ('.md','.py','.json','.toml','.yml','.yaml','.html','.txt') or p.name in ('LICENSE','.gitignore'):
+    if p.suffix.lower() in ('.md','.py','.json','.toml','.yml','.yaml','.html','.txt','.mjs','.js','.sql') or p.name in ('LICENSE','.gitignore'):
         text = data.decode('utf-8')
         for label, pattern in PATTERNS.items():
             if pattern.search(text):

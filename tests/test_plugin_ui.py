@@ -13,6 +13,9 @@ class NativeSettingsTests(unittest.TestCase):
     def setUp(self):
         self.cfg={'default_workspace':str(Path(tempfile.gettempdir())/'codex-to-zcode-bridge-test'),'default_model':{'providerId':'p','modelId':'ds'},
             'default_thought_level':'max','default_workflow_mode':'onDemand','auto_launch_desktop':True,
+            'superagent_stall_seconds':600,'superagent_read_failure_threshold':5,
+            'desktop_sync_enabled':False,'desktop_sync_control_file':'',
+            'desktop_sync_min_interval_seconds':5,
             **{key:'' for key in preferences.PATH_TITLES}}
         self.rows=[{'ref':{'providerId':'p','modelId':'ds'},'providerLabel':'DS','label':'ds',
             'reasoning':{'levels':[{'value':'high'},{'value':'max'}],'defaultLevel':'max'}},
@@ -34,11 +37,26 @@ class NativeSettingsTests(unittest.TestCase):
         self.assertEqual(set(result['schema']['properties']),set(result['values']))
         self.assertTrue(all(type(v) in (str,bool,int,float) for v in result['values'].values()))
         self.assertFalse(any(args and 'changes' in args for _,args in self.calls))
+        for key in ('default_transport','desktop_native_enabled',
+                    'desktop_native_control_file'):
+            self.assertIn(key, result['schema']['properties'])
+            self.assertIn(key, result['values'])
+        self.assertEqual(result['values']['default_transport'], 'engine')
+        self.assertTrue(any(group.get('title','').startswith('会话后端')
+                            for group in result.get('layout') or []))
 
     def test_native_updates_only_changed_fields(self):
         result=preferences.update({'set':{'auto_launch_desktop':False}})
         self.assertFalse(result['values']['auto_launch_desktop'])
         self.assertEqual(result['values']['default_workspace'],str(Path(tempfile.gettempdir())/'codex-to-zcode-bridge-test'))
+
+    def test_native_transport_update_is_validated(self):
+        with self.assertRaises(ValueError):
+            preferences.update({'set':{'default_transport':'auto'}})
+        result=preferences.update({'set':{
+            'default_transport':'desktop_native','desktop_native_enabled':True}})
+        self.assertEqual(result['values']['default_transport'],'desktop_native')
+        self.assertTrue(result['values']['desktop_native_enabled'])
 
     def test_native_path_controls_remain_available_when_engine_is_unavailable(self):
         def call(name,args=None):
@@ -97,6 +115,32 @@ class NativeSettingsTests(unittest.TestCase):
                         {'completion_notify_start_timeout_seconds':'120'}):
             with self.assertRaises(ValueError): preferences.update({'set':changes})
 
+    def test_superagent_diagnostics_and_desktop_sync_are_visible_and_bounded(self):
+        result=preferences.read()
+        for key in (*preferences.SUPERAGENT_TITLES,*preferences.DESKTOP_SYNC_TITLES):
+            self.assertIn(key,result['schema']['properties'])
+            self.assertIn(key,result['values'])
+        self.assertFalse(result['values']['desktop_sync_enabled'])
+        self.assertEqual(result['values']['desktop_sync_min_interval_seconds'],5)
+        self.assertEqual(result['values']['superagent_stall_seconds'],600)
+        updated=preferences.update({'set':{
+            'desktop_sync_enabled':True,
+            'desktop_sync_control_file':str(Path(tempfile.gettempdir())/'private-control.json'),
+            'desktop_sync_min_interval_seconds':7,
+            'superagent_stall_seconds':120,
+            'superagent_read_failure_threshold':3,
+        }})
+        self.assertTrue(updated['values']['desktop_sync_enabled'])
+        self.assertEqual(updated['values']['desktop_sync_min_interval_seconds'],7)
+        self.assertEqual(updated['values']['superagent_stall_seconds'],120)
+        self.assertEqual(updated['values']['superagent_read_failure_threshold'],3)
+        for changes in ({'desktop_sync_enabled':'true'},
+                        {'desktop_sync_min_interval_seconds':0},
+                        {'superagent_stall_seconds':10},
+                        {'superagent_read_failure_threshold':1},
+                        {'desktop_sync_token':'secret'}):
+            with self.assertRaises(ValueError): preferences.update({'set':changes})
+
     def test_no_settings_key_can_grant_wake_or_auto_continue(self):
         from zcode_bridge import storage
         from zcode_bridge.tools import TOOLS
@@ -121,6 +165,11 @@ class NativeSettingsTests(unittest.TestCase):
         self.assertIn('zcode_notify_cancel',text)
         for key in preferences.NOTIFY_TITLES.values():
             self.assertIn(key,text)
+        self.assertIn('无可观测进展判定（秒）',text)
+        self.assertIn('连续读取失败阈值',text)
+        self.assertIn('启用 Desktop 同步',text)
+        self.assertIn('Desktop 同步最小间隔（秒）',text)
+        self.assertIn('token 只从私有控制文件读取',text)
 
 
 if __name__=='__main__': unittest.main()

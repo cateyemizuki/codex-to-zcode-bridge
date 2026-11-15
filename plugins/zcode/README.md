@@ -1,6 +1,6 @@
 # Codex to ZCode Bridge：ZCode 侧
 
-ZCode 插件，提供桥接管理用的原生 skill、`bridge-settings` 命令和同一套 28 项 MCP 工具（26 项控制工具 + 2 项原生设置工具）。两侧共用本机控制服务和配置。
+ZCode 插件，提供桥接管理用的原生 skill、`bridge-settings` 命令和同一套 34 项 MCP 工具（32 项控制工具 + 2 项原生设置工具）。两侧共用本机控制服务和配置。高层入口推荐 `zcode_delegate` + `zcode_agent_message/inspect/answer/cancel`；旧 28 项工具保持兼容。
 
 ## 手动安装
 
@@ -81,4 +81,4 @@ ZCode 侧可以用 `zcode_notify_emit` 主动写入提示：
 
 本机路径由安装器生成。直接通过 ZCode 市场安装时，宿主会解析插件根目录并启动包内服务，无需额外 pip 安装；需要保证宿主 PATH 中的 `python` 可用。
 
-消息读取兼容 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；独立引擎仍不会向已打开的 Desktop 项目实时推送新会话或新消息，`desktop.indexed` 也不等于侧栏当前可见。完整项目和已知桌面同步限制：[GitHub 仓库](https://github.com/cateyemizuki/codex-to-zcode-bridge)。许可见本包 `LICENSE`。
+消息读取兼容 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`，长会话使用真实分页游标。默认独立 `engine` 不向已打开的 Desktop 项目实时推送，`desktop.indexed` 不等于侧栏当前可见。实验性 `desktop_native` 可让新任务由 Desktop 自己执行，3.18.2 完整复制件已实测同一页实时输出；需从完整仓库另行准备版本/哈希门禁的 Host，再在可视设置选择后端和本机私有 control 文件。它不在默认 ZIP 中自动安装，不接管旧 SID，部分修改操作尚不支持。完整安装、回滚与验证边界见 [GitHub 仓库](https://github.com/cateyemizuki/codex-to-zcode-bridge)。许可见本包 `LICENSE`。

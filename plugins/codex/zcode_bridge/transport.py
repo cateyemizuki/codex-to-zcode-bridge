@@ -124,6 +124,23 @@ def serve():
             self.end_headers()
             self.wfile.write(body)
 
+        def _discard_body(self, limit=2*1024*1024):
+            """Drain a small rejected body so the client can read our error.
+
+            Closing a Windows socket with unread request bytes can turn the
+            intended 401/404 into WinError 10053 on the client.  Oversized
+            bodies stay unread and are rejected by the normal size check.
+            """
+            try:
+                size = int(self.headers.get('Content-Length', '0'))
+            except (TypeError, ValueError):
+                size = 0
+            if 0 < size <= limit:
+                try:
+                    self.rfile.read(size)
+                except OSError:
+                    pass
+
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == '/settings':
@@ -136,12 +153,15 @@ def serve():
 
         def do_POST(self):
             if not self.allowed():
+                self._discard_body()
                 return self.respond({'ok': False, 'error': 'unauthorized'}, 401)
             if urlsplit(self.path).path == '/shutdown':
+                self._discard_body()
                 self.respond({'ok': True})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
             if urlsplit(self.path).path != '/call':
+                self._discard_body()
                 return self.respond({'ok': False, 'error': 'not found'}, 404)
             try:
                 size = int(self.headers.get('Content-Length', '0'))

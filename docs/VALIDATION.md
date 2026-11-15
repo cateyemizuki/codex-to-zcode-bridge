@@ -1,6 +1,41 @@
+# 0.5.1 定向修复验证记录
+
+2026-11-15。本文记录 0.5.1 的两项运行期修复；0.5.0 的实机验收记录保留在下一节，未在本轮重跑。
+
+## 修复前复现
+
+- 使用真实形状的 CreateWorkflow 技术权限 payload（含 `total_tokens`、`password` 等工作流脚本文本）调用 engine 与 native 两条 `zcode_agent_answer`：修复前都在原生 resolve 前抛出 `user_answer_required`。
+- 订阅与无订阅两条 job 同步路径中，父会话保持 idle、messageId 不变，workflow cursor 在 65 秒内从 34→61→91：修复前 job 进入 `stalled`，且 `last_sample_digest` 三次完全相同，无法单独识别 cursor 变化。冻结 cursor 34→34→34 的对照同样进入 `stalled`。
+
+## 修复后证据
+
+- `python -m unittest discover -s tests -q` → **Ran 514 tests，OK**；其中新增 34 项定向回归。
+- `python build.py --check` → **Both generated plugins match the canonical sources**。
+- `python scripts/audit_release.py` → **{"ok": true, "errors": []}**。
+- `python build.py --archives` → 新增两侧 **0.5.1** ZIP；0.5.0 ZIP 原样保留，未覆盖。
+
+## 新增回归覆盖
+
+- 技术权限：engine/native CreateWorkflow payload 含 `token`/`password` 文本时，`allow_once` 抵达真实 resolve 一次。
+- 认证负对照：真实 password/OAuth 问题在 `full_access` 与 `user_approved` 下仍拒绝；题面 `sensitive` 标志仍拒绝；无法读出题面的用户输入结构仍拒绝。
+- 工作流进展：订阅与无订阅都覆盖 cursor 34→61→91、父 idle/messageId 不变、65 秒时保持 `running`；冻结 34→34→34 在 65 秒时 `stalled`；91→0→91 往返、epoch 0→4 往返、倒退、重排、新 run cursor 0 都不刷新，稳定 epoch 内严格前进或新 run 已有事件才刷新。
+- 新 epoch 基线：e0:91 → e1:1 只落盘基线（`last_progress.at` 不变、读失败不清除），e1:2 才刷新；基线单独存在仍 `stalled`；Bridge 重建/存储重载后同 epoch 前进仍生效。
+- 子流进展：新子代理出现、子快照 `eventSeq`/`stateRevision` 摘要变化、同一 messageId 内容更新都刷新进度；`run.status=running` 单独不刷新。
+- 读失败：`workflowRunEvents` 交替失败/恢复 180 秒不会把 cursor 0 当进展并最终 `stalled`；连续失败第 5 次进入 `unobservable`；失败期间 pending 仍保持 `action_required`，不被改写为 `unobservable`。
+- 停滞与恢复：真正静默仍 `stalled`；新进展从 `stalled` 恢复；终态 `completed`/`failed`/`cancelled` 优先；workflow 读取失败不当作进展并可达 `unobservable`。
+- 既有边界：pending/`action_required`、`unobservable` 恢复、通知唤醒授权和不把 idle 当完成等原有回归保持通过。
+
+## 未在本轮验证
+
+- 未重新执行真实 CreateWorkflow 实机授权；本轮为源码语义与 fake engine/native 回归。
+- 真实 DWF 长任务中观察器 cursor 的轮询延迟仍取决于运行时；未把一次离线通过当作所有 SDK 版本均已实测。
+
+公开说明见 [RUNTIME_FIX_051.md](RUNTIME_FIX_051.md)。
+
 # 0.5.0 验证记录
 
 2026-11-15，Windows、ZCode Desktop 3.18.2、当前 Codex Desktop。根代理在委派编码后独立执行下列回归与实机验收；子代理自述不计作实机证据。
+
 
 ## 本轮实际执行
 

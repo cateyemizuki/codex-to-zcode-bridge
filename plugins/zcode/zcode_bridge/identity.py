@@ -5,6 +5,8 @@ ZCode 3.18 returns ``messages[].info.messageId`` while 3.17 used
 the same fallback order.  The helper is intentionally dependency-free so both
 ``service`` and ``notifications`` can import it without a cycle.
 """
+import hashlib
+import json
 
 
 def message_identity(message):
@@ -54,3 +56,38 @@ def is_assistant_response(message):
     if role != 'assistant' or not is_visible_message(message):
         return False
     return message_kind(message) in ('', 'assistant_response')
+
+
+def message_activity_digest(message):
+    """Return a body-free fingerprint of one message's visible activity.
+
+    Streaming engines may extend the same message id while tools or text
+    advance.  Only role, ordered part types, tool names/states and text lengths
+    are hashed; the text itself is never returned or persisted.  An empty
+    string means there is no visible, comparable activity.
+    """
+    if not isinstance(message, dict):
+        return ''
+    info = message.get('info') if isinstance(message.get('info'), dict) else {}
+    role = str(info.get('role') or message.get('role') or '')
+    parts = message.get('parts') if isinstance(message.get('parts'), list) else []
+    rows = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        kind = str(part.get('type') or '')
+        text = part.get('text')
+        if isinstance(text, str):
+            rows.append([kind, 'text', len(text),
+                         hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]])
+            continue
+        tool = part.get('tool') if isinstance(part.get('tool'), dict) else {}
+        name = (part.get('toolName') or part.get('name')
+                or tool.get('name') or tool.get('toolName') or '')
+        state = (part.get('state') or part.get('status')
+                 or tool.get('state') or tool.get('status') or '')
+        rows.append([kind, str(name)[:48], str(state)[:24]])
+    if not rows:
+        return ''
+    payload = json.dumps([role, rows], ensure_ascii=False, separators=(',', ':'))
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]

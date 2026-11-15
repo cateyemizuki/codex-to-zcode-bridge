@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 MARKET = 'codex-to-zcode-bridge-plugins'
 REPOSITORY = 'https://github.com/cateyemizuki/codex-to-zcode-bridge'
 

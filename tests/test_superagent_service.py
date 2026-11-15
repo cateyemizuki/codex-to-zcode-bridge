@@ -49,6 +49,8 @@ class FakeEngine:
         self.strict_send_schema = False
         self.fail_subagents = False
         self.fail_workflow_runs = False
+        self.fail_workflow_events = False
+        self.runtime = {}
 
     def snapshot(self, sid='sess_agent_1'):
         projection = {'status': self.status, 'turnCount': self.turn_count}
@@ -56,7 +58,7 @@ class FakeEngine:
             projection['backgroundJobs'] = copy.deepcopy(self.jobs)
         return {'session': {'sessionId': sid},
                 'projection': projection,
-                'runtime': {},
+                'runtime': copy.deepcopy(self.runtime),
                 'settings': {'permission': {'mode': self.mode},
                              'model': {'current': dict(MODEL)},
                              'thoughtLevel': {'current': 'high'}}}
@@ -85,6 +87,8 @@ class FakeEngine:
                 raise RuntimeError('workflow runs unavailable')
             return {'runs': copy.deepcopy(self.runs)}
         if method == 'v4/conversation/workflowRunEvents':
+            if self.fail_workflow_events:
+                raise RuntimeError('workflow journal unavailable')
             return {'events': copy.deepcopy(self.workflow_events), 'hasMore': False}
         if method == 'session/subagents':
             if self.fail_subagents:
@@ -802,6 +806,734 @@ class SuperagentServiceTests(unittest.TestCase):
                 'agent_id': delegate['agent_id'], 'request_id': 'req-pref',
                 'answer': 'A', 'caller_permission_mode': 'full_access'})
         self.assertIn('user_answer_required', str(caught.exception))
+
+    def test_answer_technical_permission_ignores_workflow_code_tokens(self):
+        """A CreateWorkflow approval is a tool permission, not a credential question.
+
+        The real pending request embeds the workflow script.  Words such as
+        ``total_tokens`` and ``password`` in that data must not turn a technical
+        permission into an authentication question.
+        """
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        script = ("const stats = await runBenchmark();\n"
+                  "const passwordField = 'not-a-credential';\n"
+                  "report({ total_tokens: stats.totalTokens, api_key_name: 'K' });")
+        self.bridge._request({'id': 'wire-workflow',
+                              'method': 'interaction/requestPermission',
+                              'params': {
+                                  'requestId': 'req-workflow',
+                                  'sessionId': delegate['session_id'],
+                                  'toolCallId': 'call-workflow',
+                                  'toolName': 'CreateWorkflow',
+                                  'reason': 'Run the offline benchmark that counts total_tokens',
+                                  'input': {'task': 'offline benchmark', 'script': script},
+                                  'options': [
+                                      {'optionId': 'allow_once',
+                                       'response': {'decision': 'allow'}},
+                                      {'optionId': 'deny',
+                                       'response': {'decision': 'deny'}}]}})
+        result = self.call('zcode_agent_answer', {
+            'agent_id': delegate['agent_id'], 'request_id': 'req-workflow',
+            'option_id': 'allow_once', 'caller_permission_mode': 'full_access'})
+        self.assertTrue(result['answered'])
+        self.bridge.client.respond.assert_called_once_with(
+            'wire-workflow', {'decision': 'allow'})
+
+    def test_native_technical_permission_ignores_workflow_code_tokens(self):
+        native = self.use_native()
+        delegated = self.call('zcode_delegate', {
+            'task': '做一个离线 benchmark', 'workspace': str(self.workspace),
+            'thought_level': 'high', 'transport': 'desktop_native',
+            'caller_permission_mode': 'full_access', 'idempotency_key': 'native-wf'})
+        sid = delegated['session_id']
+        native.snapshots[sid]['projection']['pendingPermissions'] = [{
+            'requestId': 'perm-workflow', 'toolCallId': 'call-workflow',
+            'toolName': 'CreateWorkflow', 'reason': 'benchmark total_tokens',
+            'riskLevel': 'low',
+            'input': {'task': 'offline benchmark',
+                      'script': "const password = 'demo'; total_tokens += 1;"},
+            'options': [
+                {'optionId': 'allow_once', 'label': 'Allow once', 'kind': 'allowOnce'},
+                {'optionId': 'deny', 'label': 'Deny', 'kind': 'deny'}]}]
+        answered = self.call('zcode_agent_answer', {
+            'agent_id': delegated['agent_id'], 'request_id': 'perm-workflow',
+            'option_id': 'allow_once', 'caller_permission_mode': 'full_access'})
+        self.assertTrue(answered['answered'])
+        self.assertEqual(len(native.resolve_calls), 1)
+        self.assertEqual(native.resolve_calls[0]['interaction_id'], 'perm-workflow')
+        self.assertEqual(native.resolve_calls[0]['answer'], {'optionId': 'allow_once'})
+
+    def test_answer_still_refuses_real_credential_question(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        self.bridge._request({'id': 'wire-real-auth',
+                              'method': 'interaction/requestUserInput',
+                              'params': {
+                                  'requestId': 'req-real-auth',
+                                  'sessionId': delegate['session_id'],
+                                  'toolCallId': 'c-real-auth',
+                                  'toolName': 'AskUserQuestion',
+                                  'input': {'questions': [{
+                                      'question': '请输入账户 password 以完成 OAuth 登录',
+                                      'options': [{'label': '稍后'}]}]}}})
+        for extra in ({}, {'user_approved': True}):
+            with self.assertRaises(ValueError) as caught:
+                self.call('zcode_agent_answer', {
+                    'agent_id': delegate['agent_id'], 'request_id': 'req-real-auth',
+                    'response': {'action': 'accept', 'content': {'answers': {}}},
+                    'caller_permission_mode': 'full_access', **extra})
+            self.assertIn('user_answer_required', str(caught.exception))
+        self.bridge.client.respond.assert_not_called()
+
+    def test_answer_sensitive_question_flag_still_requires_user(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        self.bridge._request({'id': 'wire-sensitive',
+                              'method': 'interaction/requestUserInput',
+                              'params': {'requestId': 'req-sensitive',
+                                         'sessionId': delegate['session_id'],
+                                         'toolCallId': 'c-sensitive',
+                                         'toolName': 'AskUserQuestion',
+                                         'input': {'questions': [{
+                                             'question': '请选择要继续的方式',
+                                             'sensitive': True,
+                                             'options': [{'label': 'A'}, {'label': 'B'}]}]}}})
+        with self.assertRaises(ValueError) as caught:
+            self.call('zcode_agent_answer', {
+                'agent_id': delegate['agent_id'], 'request_id': 'req-sensitive',
+                'answer': 'A', 'caller_permission_mode': 'full_access'})
+        self.assertIn('user_answer_required', str(caught.exception))
+        self.bridge.client.respond.assert_not_called()
+
+    def test_answer_unreadable_user_input_stays_conservative(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        self.bridge._request({'id': 'wire-unknown', 'method': 'interaction/requestUserInput',
+                              'params': {'requestId': 'req-unknown',
+                                         'sessionId': delegate['session_id'],
+                                         'toolCallId': 'c-unknown',
+                                         'toolName': 'AskUserQuestion',
+                                         'input': {'script': 'password = token'}}})
+        with self.assertRaises(ValueError) as caught:
+            self.call('zcode_agent_answer', {
+                'agent_id': delegate['agent_id'], 'request_id': 'req-unknown',
+                'response': {'action': 'accept', 'content': {'answers': {}}},
+                'caller_permission_mode': 'full_access', 'user_approved': True})
+        self.assertIn('user_answer_required', str(caught.exception))
+        self.bridge.client.respond.assert_not_called()
+
+    def test_subscribed_workflow_cursor_progress_prevents_false_stall(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = time.time()
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='m-parent',
+            run_cursors={'epoch:run-1': 34})
+        self.bridge.superagent.clock = lambda: base - 120
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='m-parent', status='idle')
+        self.bridge.superagent.clock = time.time
+        self.bridge.sync_superagent_jobs(base)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 34)
+
+        # Parent status/message id are unchanged and the run merely says
+        # "running": that alone must not refresh the stall clock.
+        self.bridge.sync_superagent_jobs(base + 120)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+
+        # A real journal cursor advance is observable progress and recovers.
+        self.bridge.notifications.touch(sub_id, run_cursors={'epoch:run-1': 91})
+        self.bridge.sync_superagent_jobs(base + 121)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 91)
+        self.assertIn('job.resumed', [row['kind'] for row in job['events']])
+
+    def test_subscribed_new_child_is_progress_but_silence_stalls(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = time.time()
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='m-parent',
+            known_child_ids=['child-1'])
+        self.bridge.sync_superagent_jobs(base)
+        self.bridge.sync_superagent_jobs(base + 120)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+
+        self.bridge.notifications.touch(sub_id, known_child_ids=['child-1', 'child-2'])
+        self.bridge.sync_superagent_jobs(base + 121)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['activity']['children'], 'child-1,child-2')
+
+    def test_subscribed_cursor_34_61_91_at_65s_is_not_stalled(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            run_cursors={'stream-1:run-test': 34})
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run-test': {'epoch': 'stream-1', 'cursor': 34}}, at=base)
+        self.bridge.sync_superagent_jobs(base)
+        self.bridge.notifications.touch(sub_id, run_cursors={'stream-1:run-test': 61})
+        self.bridge.sync_superagent_jobs(base + 30)
+        self.bridge.notifications.touch(sub_id, run_cursors={'stream-1:run-test': 91})
+        self.bridge.sync_superagent_jobs(base + 65)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base + 65)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-test']['cursor'], 91)
+
+    def test_subscribed_cursor_frozen_34_stalls_at_65s(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            run_cursors={'stream-1:run-test': 34})
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run-test': {'epoch': 'stream-1', 'cursor': 34}}, at=base)
+        for moment in (base, base + 30, base + 65):
+            self.bridge.sync_superagent_jobs(moment)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-test']['cursor'], 34)
+
+    def test_subscribed_cursor_rewind_or_reorder_is_not_progress(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            run_cursors={'stream-1:run-test': 91})
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run-test': {'epoch': 'stream-1', 'cursor': 91}}, at=base)
+        for moment, cursors in ((base + 30, {'stream-1:run-test': 34}),
+                                (base + 65, {'stream-1:run-test': 61}),
+                                (base + 70, {'stream-1:run-test': 91})):
+            self.bridge.notifications.touch(sub_id, run_cursors=cursors)
+            self.bridge.sync_superagent_jobs(moment)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-test']['cursor'], 91)
+
+    def test_subscribed_child_stream_update_recovers_stalled(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = time.time()
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            last_child_activity='rev-351')
+        self.bridge.sync_superagent_jobs(base)
+        self.bridge.sync_superagent_jobs(base + 120)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.bridge.notifications.touch(sub_id, last_child_activity='rev-600')
+        self.bridge.sync_superagent_jobs(base + 121)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['activity']['child_stream'], 'rev-600')
+
+    def test_subscribed_terminal_truth_wins_over_advancing_cursor(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        sub_id = delegate['subscription']['subscription_id']
+        self.bridge.notifications.touch(
+            sub_id, state='completed', state_reason='idle_stable',
+            run_cursors={'epoch:run-1': 91})
+        self.bridge.sync_superagent_jobs(time.time() + 600)
+        job = self.bridge.superagent.get(delegate['job_id'], 'chat-A')
+        self.assertEqual(job['status'], 'verified')
+
+    def test_unsubscribed_workflow_cursor_progress_prevents_false_stall(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'working'}]}]
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 35)]
+        base = time.time()
+        self.bridge.sync_superagent_jobs(base)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 34)
+
+        # Parent status and message id stay identical; the journal advances.
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 92)]
+        self.bridge.sync_superagent_jobs(base + 120)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 91)
+
+        # Genuine silence still stalls.
+        self.bridge.sync_superagent_jobs(base + 240)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 120)]
+        self.bridge.sync_superagent_jobs(base + 300)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 119)
+
+    def test_unsubscribed_cursor_34_61_91_at_65s_is_not_stalled(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'main-final', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'done'}]}]
+        self.fake.runs = [{'runId': 'run-test', 'status': 'running'}]
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='poll', message_id='main-final', status='idle',
+            run_watermarks={'run-test': {'epoch': '', 'cursor': 34}}, at=base)
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 35)]
+        self.bridge.sync_superagent_jobs(base)
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 62)]
+        self.bridge.sync_superagent_jobs(base + 30)
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 92)]
+        self.bridge.sync_superagent_jobs(base + 65)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base + 65)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-test']['cursor'], 91)
+
+    def test_unsubscribed_cursor_frozen_34_stalls_at_65s(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'main-final', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'done'}]}]
+        self.fake.runs = [{'runId': 'run-test', 'status': 'running'}]
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 35)]
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='poll', message_id='main-final', status='idle',
+            run_watermarks={'run-test': {'epoch': '', 'cursor': 34}}, at=base)
+        for moment in (base, base + 30, base + 65):
+            self.bridge.sync_superagent_jobs(moment)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-test']['cursor'], 34)
+
+    def test_unsubscribed_cursor_91_0_91_0_91_does_not_refresh(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'done'}]}]
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='poll', message_id='m1', status='idle',
+            run_watermarks={'run-1': {'epoch': '', 'cursor': 91}}, at=base)
+        for offset, cursor in ((0, 91), (30, 0), (60, 91), (90, 0), (120, 91)):
+            self.fake.workflow_events = [
+                {'type': 'node-started', 'sequence': seq, 'payload': {}}
+                for seq in range(1, cursor + 1)]
+            self.bridge.sync_superagent_jobs(base + offset)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 91)
+
+    def test_unsubscribed_same_message_update_counts_as_progress(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'a'}]}]
+        base = time.time()
+        self.bridge.sync_superagent_jobs(base)
+        first = self.bridge.superagent.get(job_id, 'chat-A')
+        first_digest = first['last_progress']['activity']['message']
+        self.assertTrue(first_digest.startswith('m1#'))
+
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text',
+                                          'text': 'a much longer streamed answer'}]}]
+        self.bridge.sync_superagent_jobs(base + 120)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertNotEqual(job['last_progress']['activity']['message'], first_digest)
+
+        self.bridge.sync_superagent_jobs(base + 240)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+
+    def test_unsubscribed_read_failure_is_not_progress(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'working'}]}]
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 35)]
+        base = time.time()
+        self.bridge.sync_superagent_jobs(base)
+        self.fake.fail_workflow_runs = True
+        for index in range(5):
+            self.bridge.sync_superagent_jobs(base + 120 + index * 10)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'unobservable')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 34)
+
+        # Reads recover and the journal advances: the job is observable again
+        # and the new cursor is real progress.
+        self.fake.fail_workflow_runs = False
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 60)]
+        self.bridge.sync_superagent_jobs(base + 300)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 59)
+        kinds = [row['kind'] for row in job['events']]
+        self.assertIn('job.unobservable', kinds)
+        self.assertIn('job.resumed', kinds)
+        self.assertIn('observer_recovered', [row['reason'] for row in job['events']])
+
+    def test_unsubscribed_terminal_engine_state_wins_over_read_failures(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        self.fake.status = 'cancelled'
+        self.fake.fail_workflow_runs = True
+        self.bridge.sync_superagent_jobs(time.time() + 10)
+        job = self.bridge.superagent.get(delegate['job_id'], 'chat-A')
+        self.assertEqual(job['status'], 'cancelled')
+        self.assertEqual(job['status_reason'], 'engine_cancelled')
+
+    def test_unsubscribed_new_child_is_progress_but_silence_stalls(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'working'}]}]
+        base = time.time()
+        self.bridge.sync_superagent_jobs(base)
+        self.bridge.sync_superagent_jobs(base + 120)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+
+        self.fake.child_ids = ['child-1']
+        self.bridge.sync_superagent_jobs(base + 125)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['activity']['children'], 'child-1')
+
+        self.bridge.sync_superagent_jobs(base + 250)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+
+    def test_cursor_watermarks_advance_only_strictly_forward(self):
+        previous = {'run-1': {'epoch': 'e', 'cursor': 34},
+                    'run-2': {'epoch': 'e', 'cursor': 5}}
+        # Unchanged, reordered, backward and zero-cursor new runs never advance.
+        for current in (
+                {'run-1': {'epoch': 'e', 'cursor': 34}},
+                {'run-2': {'epoch': 'e', 'cursor': 5},
+                 'run-1': {'epoch': 'e', 'cursor': 34}},
+                {'run-1': {'epoch': 'e', 'cursor': 20},
+                 'run-2': {'epoch': 'e', 'cursor': 5}},
+                {'run-1': {'epoch': 'e', 'cursor': 34},
+                 'run-2': {'epoch': 'e', 'cursor': 5},
+                 'run-3': {'epoch': 'e', 'cursor': 0}}):
+            advanced, merged = self.bridge._advance_watermarks(previous, current)
+            self.assertFalse(advanced, current)
+            self.assertEqual(merged['run-1']['cursor'], 34)
+            self.assertEqual(merged['run-2']['cursor'], 5)
+        # Only a strictly greater same-run cursor (or a new run with events)
+        # is progress.
+        advanced, merged = self.bridge._advance_watermarks(
+            previous, {'run-1': {'epoch': 'e', 'cursor': 61},
+                       'run-2': {'epoch': 'e', 'cursor': 5}})
+        self.assertTrue(advanced)
+        self.assertEqual(merged['run-1']['cursor'], 61)
+        advanced, merged = self.bridge._advance_watermarks(
+            previous, {'run-3': {'epoch': 'e', 'cursor': 1}})
+        self.assertTrue(advanced)
+        self.assertEqual(merged['run-3']['cursor'], 1)
+        # A rewind cannot lower the persisted high-water mark.
+        advanced, merged = self.bridge._advance_watermarks(
+            {'run-1': {'epoch': 'e', 'cursor': 91}},
+            {'run-1': {'epoch': 'e', 'cursor': 34}})
+        self.assertFalse(advanced)
+        self.assertEqual(merged['run-1']['cursor'], 91)
+
+    def test_epoch_churn_without_cursor_advance_is_not_progress(self):
+        previous = {'run': {'epoch': 'epoch0', 'cursor': 91}}
+        for epoch in ('epoch1', 'epoch2', 'epoch3'):
+            advanced, merged = self.bridge._advance_watermarks(
+                previous, {'run': {'epoch': epoch, 'cursor': 91}})
+            self.assertFalse(advanced, epoch)
+            self.assertEqual(merged['run']['cursor'], 91)
+            previous = merged
+        # An epoch change alone never advances, even with a higher cursor.
+        advanced, merged = self.bridge._advance_watermarks(
+            previous, {'run': {'epoch': 'epoch4', 'cursor': 92}})
+        self.assertFalse(advanced)
+        self.assertEqual(merged['run']['epoch'], 'epoch4')
+        self.assertEqual(merged['run']['cursor'], 92)
+        # A later strictly forward cursor in the same new epoch does.
+        advanced, merged = self.bridge._advance_watermarks(
+            merged, {'run': {'epoch': 'epoch4', 'cursor': 93}})
+        self.assertTrue(advanced)
+        self.assertEqual(merged['run']['cursor'], 93)
+
+    def test_subscribed_epoch_churn_does_not_refresh_forever(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run': {'epoch': 'epoch0', 'cursor': 91}}, at=base)
+        cursors = {'epoch0:run': 91}
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            run_cursors=dict(cursors))
+        self.bridge.sync_superagent_jobs(base)
+        for index, moment in enumerate((base + 30, base + 60, base + 90, base + 120),
+                                       start=1):
+            cursors['epoch' + str(index) + ':run'] = 91
+            self.bridge.notifications.touch(sub_id, run_cursors=dict(cursors))
+            self.bridge.sync_superagent_jobs(moment)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run']['cursor'], 91)
+
+    def test_subscribed_cursor_91_0_91_0_91_does_not_refresh(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run': {'epoch': 'epoch', 'cursor': 91}}, at=base)
+        for offset, cursor in ((0, 91), (30, 0), (60, 91), (90, 0), (120, 91)):
+            self.bridge.notifications.touch(
+                sub_id, last_status='idle', last_message_id='main-final',
+                run_cursors={'epoch:run': cursor})
+            self.bridge.sync_superagent_jobs(base + offset)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run']['cursor'], 91)
+
+    def test_unsubscribed_journal_read_errors_do_not_count_as_zero_progress(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'done'}]}]
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 92)]
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='poll', message_id='m1', status='idle',
+            run_watermarks={'run-1': {'epoch': '', 'cursor': 91}}, at=base)
+        self.bridge.sync_superagent_jobs(base)
+        for index in range(1, 7):
+            self.fake.fail_workflow_events = bool(index % 2)
+            self.bridge.sync_superagent_jobs(base + index * 30)
+            if index == 1:
+                during = self.bridge.superagent.get(job_id, 'chat-A')
+                self.assertGreaterEqual(during['read_failures']['consecutive'], 1)
+                self.assertEqual(during['last_progress']['at'], base)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1']['cursor'], 91)
+        self.assertLessEqual(job['read_failures']['consecutive'], 1)
+
+    def test_unsubscribed_consecutive_journal_errors_reach_unobservable(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        self.fake.fail_workflow_events = True
+        base = 1000.0
+        for index in range(1, 6):
+            self.bridge.sync_superagent_jobs(base + index * 10)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'unobservable')
+        self.assertGreaterEqual(job['read_failures']['consecutive'], 5)
+
+    def test_unsubscribed_pending_outranks_read_failure_unobservable(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        self.fake.status = 'idle'
+        self.bridge._request({'id': 'wire-pending',
+                              'method': 'interaction/requestPermission',
+                              'params': {'requestId': 'req-pending',
+                                         'sessionId': delegate['session_id'],
+                                         'toolCallId': 'call-pending',
+                                         'toolName': 'permission',
+                                         'options': [{'optionId': 'allow'}]}})
+        self.fake.fail_workflow_runs = True
+        base = 1000.0
+        for index in range(6):
+            self.bridge.sync_superagent_jobs(base + index * 10)
+        job = self.bridge.superagent.get(delegate['job_id'], 'chat-A')
+        self.assertEqual(job['status'], 'action_required')
+        self.assertGreaterEqual(job['read_failures']['consecutive'], 5)
+
+    def test_subscribed_new_epoch_baseline_then_advance(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run': {'epoch': 'e0', 'cursor': 91}}, at=base)
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            run_cursors={'e0:run': 91})
+        self.bridge.sync_superagent_jobs(base)
+        # New epoch's first cursor is persisted as a baseline, not progress.
+        self.bridge.notifications.touch(sub_id, run_cursors={'e1:run': 1})
+        self.bridge.sync_superagent_jobs(base + 30)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run'],
+                         {'epoch': 'e1', 'cursor': 1})
+        # A later strictly greater cursor in that same epoch is real progress.
+        self.bridge.notifications.touch(sub_id, run_cursors={'e1:run': 2})
+        self.bridge.sync_superagent_jobs(base + 65)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base + 65)
+        self.assertEqual(job['last_progress']['run_watermarks']['run'],
+                         {'epoch': 'e1', 'cursor': 2})
+
+    def test_subscribed_new_epoch_baseline_alone_does_not_refresh(self):
+        delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))
+        job_id = delegate['job_id']
+        sub_id = delegate['subscription']['subscription_id']
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='observer', message_id='main-final', status='idle',
+            run_watermarks={'run': {'epoch': 'e0', 'cursor': 91}}, at=base)
+        self.bridge.notifications.touch(
+            sub_id, last_status='idle', last_message_id='main-final',
+            run_cursors={'e0:run': 91})
+        self.bridge.sync_superagent_jobs(base)
+        self.bridge.notifications.touch(sub_id, run_cursors={'e1:run': 1})
+        self.bridge.sync_superagent_jobs(base + 30)
+        self.bridge.sync_superagent_jobs(base + 65)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'stalled')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run'],
+                         {'epoch': 'e1', 'cursor': 1})
+
+    def test_unsubscribed_new_epoch_baseline_then_advance(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'done'}]}]
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='poll', message_id='m1', status='idle',
+            run_watermarks={'run-1': {'epoch': 'e0', 'cursor': 91}}, at=base)
+        self.fake.runtime = {'streamId': 'e0'}
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 92)]
+        self.bridge.sync_superagent_jobs(base)
+        for _ in range(3):
+            self.bridge.superagent.record_read_failure(
+                job_id, 'chat-A', 'synthetic_read_failure')
+        self.fake.runtime = {'streamId': 'e1'}
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': 1, 'payload': {}}]
+        self.bridge.sync_superagent_jobs(base + 30)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1'],
+                         {'epoch': 'e1', 'cursor': 1})
+        # A baseline-only write must not clear the read-failure streak.
+        self.assertEqual(job['read_failures']['consecutive'], 3)
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': 1, 'payload': {}},
+            {'type': 'node-started', 'sequence': 2, 'payload': {}}]
+        self.bridge.sync_superagent_jobs(base + 65)
+        job = self.bridge.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base + 65)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1'],
+                         {'epoch': 'e1', 'cursor': 2})
+        self.assertEqual(job['read_failures']['consecutive'], 0)
+
+    def test_unsubscribed_new_epoch_baseline_survives_bridge_reload(self):
+        delegate = self.call('zcode_delegate', self.delegate_args())
+        job_id = delegate['job_id']
+        self.fake.status = 'idle'
+        self.fake.messages = [{'info': {'id': 'm1', 'role': 'assistant'},
+                               'parts': [{'type': 'text', 'text': 'done'}]}]
+        self.fake.runs = [{'runId': 'run-1', 'status': 'running'}]
+        base = 1000.0
+        self.bridge.superagent.record_progress(
+            job_id, 'chat-A', kind='poll', message_id='m1', status='idle',
+            run_watermarks={'run-1': {'epoch': 'e0', 'cursor': 91}}, at=base)
+        self.fake.runtime = {'streamId': 'e0'}
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': seq, 'payload': {}}
+            for seq in range(1, 92)]
+        self.bridge.sync_superagent_jobs(base)
+        self.fake.runtime = {'streamId': 'e1'}
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': 1, 'payload': {}}]
+        self.bridge.sync_superagent_jobs(base + 30)
+        reopened = self.make_bridge()
+        stored = reopened.superagent.get(job_id, 'chat-A')
+        self.assertEqual(stored['last_progress']['at'], base)
+        self.assertEqual(stored['last_progress']['run_watermarks']['run-1'],
+                         {'epoch': 'e1', 'cursor': 1})
+        self.fake.workflow_events = [
+            {'type': 'node-started', 'sequence': 1, 'payload': {}},
+            {'type': 'node-started', 'sequence': 2, 'payload': {}}]
+        reopened.sync_superagent_jobs(base + 65)
+        job = reopened.superagent.get(job_id, 'chat-A')
+        self.assertEqual(job['status'], 'running')
+        self.assertEqual(job['last_progress']['at'], base + 65)
+        self.assertEqual(job['last_progress']['run_watermarks']['run-1'],
+                         {'epoch': 'e1', 'cursor': 2})
 
     def test_report_without_session_uses_bound_job(self):
         delegate = self.call('zcode_delegate', self.delegate_args(notify=self.authorized_notify()))

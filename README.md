@@ -2,7 +2,7 @@
 
 让 ChatGPT / Codex 和其他支持本机 MCP 的 agent 工具调用本机 ZCode：选择已有模型、在指定工作区创建会话、派发任务、读取主代理和子代理结果、处理问题与授权，并使用 ZCode 的原生动态工作流。任务完成后，桥接可以持久记录完成事件，并在版本支持的 Codex Desktop 上尝试唤醒原 chat 继续验收。
 
-本仓库提供两个独立安装包，版本 **0.5.0**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。
+本仓库提供两个独立安装包，版本 **0.5.1**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。0.5.1 的两项运行期修复见 [RUNTIME_FIX_051.md](docs/RUNTIME_FIX_051.md)。
 
 | 安装包 | 用途 | 说明 |
 | --- | --- | --- |
@@ -45,7 +45,7 @@
 
 ## 安装前
 
-需要 Python 3.10+、Node.js、已安装并完成模型配置的 ZCode。GPT / Codex 安装器还需要可用的 `codex` CLI。运行时没有第三方 Python 依赖。早期完整实机基线为 Windows、ZCode Desktop 3.17.2 / engine 0.17.1、Python 3.12、Node.js 24；0.3.1 验证了 Desktop 3.18.2 消息字段与分页，0.4.0 验证了真实模型任务的完成通知及同一 Codex Desktop 会话结束后的自动续工，0.5.0 增加高层子代理 API、自动回传状态机与可选 Desktop sync 适配器。宿主能力按运行时探测；其他版本需重新验证。详见 [验证记录](docs/VALIDATION.md)。
+需要 Python 3.10+、Node.js、已安装并完成模型配置的 ZCode。GPT / Codex 安装器还需要可用的 `codex` CLI。运行时没有第三方 Python 依赖。早期完整实机基线为 Windows、ZCode Desktop 3.17.2 / engine 0.17.1、Python 3.12、Node.js 24；0.3.1 验证了 Desktop 3.18.2 消息字段与分页，0.4.0 验证了真实模型任务的完成通知及同一 Codex Desktop 会话结束后的自动续工，0.5.0 增加高层子代理 API、自动回传状态机与可选 Desktop sync 适配器，0.5.1 修复技术工作流文本被误判认证与工作流有进展却误报 stalled。宿主能力按运行时探测；其他版本需重新验证。详见 [验证记录](docs/VALIDATION.md)。
 
 从 GitHub 直接安装 Python 服务包或克隆仓库还需要 Git；ZIP 安装器不要求先执行 pip 安装。
 
@@ -58,7 +58,7 @@
 本机已有 Python、Node 和 ZCode 时，先安装 MCP 服务的 Python 包，再用 Codex 命令注册市场和安装插件：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.0#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.1#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```
@@ -85,7 +85,7 @@ python install.py --target both --zcode-executable "<ZCode 可执行文件的绝
 
 ### 从 ZIP 安装
 
-在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.0.zip` 或 `codex-to-zcode-bridge-zcode-0.5.0.zip`，解压后进入该目录，运行：
+在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.1.zip` 或 `codex-to-zcode-bridge-zcode-0.5.1.zip`，解压后进入该目录，运行：
 
 ```powershell
 python install.py
@@ -170,7 +170,7 @@ python scripts/desktop_sync_probe.py --control <private>/control.json --op sync 
 
 该模式支持显式模型与强度创建、输入、快照/分页历史、真实问题回答、父会话与 DWF 子代理只读内容、完成事件和版本支持的宿主续工。新 SID 固定绑定该 Desktop 实例；关闭、替换实例或 runtime 不可用时给出诊断，不转到独立 engine。模型/模式 setter、后台任务取消、会话级 report MCP 注入等尚未提供，调用会明确返回不支持。两种后端的能力边界见 [Host 契约](docs/NATIVE_HOST_INTEGRATION.md)。
 
-0.5.0 的独立回归为 480 项（含 42 项 Node 行为用例）；实机已覆盖原生实际编码任务完成后接回原 Codex chat、真实问答往返及同一页延迟工具执行、report-only MCP 调用和 DWF 子代理内容读取。列表出现可能有被动延迟，创建成功仍不代表列表此刻已经可见。
+0.5.1 的独立回归为 514 项（含 42 项 Node 行为用例）；实机已覆盖原生实际编码任务完成后接回原 Codex chat、真实问答往返及同一页延迟工具执行、report-only MCP 调用和 DWF 子代理内容读取。列表出现可能有被动延迟，创建成功仍不代表列表此刻已经可见。
 
 ## 已知边界
 

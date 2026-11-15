@@ -1,6 +1,6 @@
 # ZCode Superagent 操作审计与使用说明
 
-本文不是架构设计稿。它列出哪些字段仍要人写、哪些由桥接自动取得、哪些必须由人或根代理决定，并给出 0.5.0 的高层 API、状态机、Desktop 同步和未覆盖边界。字段名与代码位置以当前仓库为准。
+本文不是架构设计稿。它列出哪些字段仍要人写、哪些由桥接自动取得、哪些必须由人或根代理决定，并给出 0.5.1 的高层 API、状态机、Desktop 同步和未覆盖边界。字段名与代码位置以当前仓库为准。
 
 ## 1. 操作审计表
 
@@ -73,6 +73,7 @@
 - `verified`/`success` 的机器验证范围固定为 `verification_scope=turn_lifecycle`：只证明该执行轮已结束，不证明自然语言任务成功。`inspect` 与 job 摘要同时给出 `task_success=null`、`task_review=needs_parent_review`；父代理必须读 `include_report=true` 的结构化结果并自行复核业务目标。
 - 没有通知订阅的 job 也会按节流读取真实 session 投影：可持续进入 `stalled`（无进展）、`unobservable`（连续读取失败）、`failed`（引擎 error / 失效会话）或 `cancelled`（引擎取消）。引擎看起来 idle 时只给 `verdict=engine_idle_unverified`、`confirmed=false`，绝不据 idle 标 `verified`；自动宿主唤醒仍然只属于显式 notify 授权。
 - 同一 job 同一 kind/reason 的 job 事件只写一次；普通进度只更新 `last_progress`，不产生 job 事件。`stalled`/`unobservable` 额外发一次稳定 hint 事件，避免唤醒风暴；无订阅时只写本地诊断状态，不触发宿主唤醒。
+- `last_progress` 除 `at/kind/message_id/status` 外还有 `run_watermarks`（按 run 保存 `{epoch, cursor}` 高水位）和紧凑的 `activity`（已知子代理 ID、子快照 `eventSeq`/`stateRevision`/`turnCount` 摘要、最后一条消息的无正文摘要）。只有同一 run 在同一 epoch 内 cursor 严格前进、子流/消息活动变化或父状态变化才刷新；不变、倒退、重排、epoch 往返、轮询和 `run.status=running` 本身都不刷新。epoch 变更只建立新基线并单独落盘（不刷新 `last_progress.at`、不清读失败），后续同 epoch 严格增加才刷新。读取失败（包括 journal 读取失败被跳过）不当作进展；连续失败仍可达 `unobservable`，成功读取会打断连续失败。真实 pending 优先于读失败诊断。摘要不包含消息正文、路径、provider 或凭据。
 - 待回答归属 job 会话 + 订阅 `known_child_ids`；未知 session 有 pending 时按 5 秒节流从 DWF 拓扑发现 actor，之后 inspect/answer/auto-return 都能归属。
 - `zcode_agent_inspect` 在本轮读取失败/进度写入之后重新读取 job，因此同一响应里的 `job.read_failures`/`observation` 与 `errors` 一致。
 - 事件 ID、订阅 ID、输入 ID 稳定；重启后读取同一状态；超时/过期只映射 `expired`，不会静默成功。

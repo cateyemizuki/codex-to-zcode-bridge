@@ -243,6 +243,51 @@ class ObserverTruthTests(ObserverHarness):
         self.assertEqual(page['final_message_id'], 'assistant-new')
         self.assertTrue(page['final_after_anchor'])
 
+    def test_same_message_content_update_changes_activity_without_body(self):
+        sub = running_subscription(self.store)
+        self.runtime.message_rows = [
+            {'info': {'id': 'm1', 'role': 'user'}, 'parts': []},
+            {'info': {'id': 'm2', 'role': 'assistant', 'semantics': {
+                'kind': 'assistant_response'}},
+             'parts': [{'type': 'text', 'text': 'short secret body'}]}]
+        first = self.observer._messages(sub, SID, None)
+        self.assertTrue(first['message_activity'])
+        self.assertNotIn('secret', first['message_activity'])
+        self.runtime.message_rows[-1]['parts'][0]['text'] = 'a much longer streamed answer'
+        second = self.observer._messages(sub, SID, None)
+        self.assertEqual(first['final_message_id'], second['final_message_id'])
+        self.assertNotEqual(first['message_activity'], second['message_activity'])
+        self.assertNotIn('longer', second['message_activity'])
+
+    def test_observation_persists_message_activity_digest(self):
+        sub = running_subscription(self.store)
+        self.runtime.message_rows = [
+            {'info': {'id': 'm1', 'role': 'user'}, 'parts': []},
+            {'info': {'id': 'm2', 'role': 'assistant', 'semantics': {
+                'kind': 'assistant_response'}},
+             'parts': [{'type': 'text', 'text': 'working'}]}]
+        self.observer.observe(self.store.find_subscription(sub['subscription_id']))
+        current = self.store.find_subscription(sub['subscription_id'])
+        self.assertTrue(current['last_message_activity'])
+        self.assertNotIn('working', current['last_message_activity'])
+
+    def test_child_stream_metadata_persists_without_body(self):
+        sub = running_subscription(self.store)
+        self.runtime.child_rows = [{
+            'id': 'child-test', 'projection_status': 'running',
+            'activity': 'projection.eventSeq=351;runtime.stateRevision=2'}]
+        self.observer.observe(self.store.find_subscription(sub['subscription_id']))
+        current = self.store.find_subscription(sub['subscription_id'])
+        first = current['last_child_activity']
+        self.assertTrue(first)
+        self.assertNotIn('351', first)
+        self.runtime.child_rows[0]['activity'] = (
+            'projection.eventSeq=600;runtime.stateRevision=3')
+        self.observer.observe(current)
+        current = self.store.find_subscription(sub['subscription_id'])
+        self.assertTrue(current['last_child_activity'])
+        self.assertNotEqual(current['last_child_activity'], first)
+
     def test_offline_collection_failure_still_expires_at_deadline(self):
         sub = running_subscription(self.store)
         self.store.touch(sub['subscription_id'], expires_at=self.clock.value - 1)

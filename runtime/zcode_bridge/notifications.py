@@ -22,7 +22,8 @@ import uuid
 from pathlib import Path
 
 from .storage import read_json, write_json
-from .identity import is_assistant_response, is_visible_message, message_identity
+from .identity import (is_assistant_response, is_visible_message,
+                       message_activity_digest, message_identity)
 
 SCHEMA_VERSION = 1
 
@@ -400,8 +401,9 @@ def _notice(kind, reason, anchor, tag, status='info', delivery='pending'):
             'status': status, 'delivery': delivery}
 
 
-def _obs_digest(status, turn_count, last_message_id, active_digest):
-    return hashlib.sha256(_canonical([status, turn_count, last_message_id, active_digest]).encode('utf-8')).hexdigest()
+def _obs_digest(status, turn_count, last_message_id, active_digest, message_activity=''):
+    return hashlib.sha256(_canonical([status, turn_count, last_message_id, active_digest,
+                                      message_activity]).encode('utf-8')).hexdigest()
 
 
 class NotificationStore:
@@ -632,6 +634,8 @@ class NotificationStore:
             'last_status': '',
             'last_turn_count': 0,
             'last_message_id': '',
+            'last_message_activity': '',
+            'last_child_activity': '',
             'last_sample_digest': '',
             'stable_samples': 0,
             'attempts': 0,
@@ -992,6 +996,10 @@ class NotificationStore:
                 sub['turn']['user_message_id'] = evidence['user_message_id']
             if evidence.get('final_message_id'):
                 sub['last_message_id'] = evidence['final_message_id']
+            if evidence.get('message_activity'):
+                sub['last_message_activity'] = str(evidence['message_activity'])
+            if evidence.get('child_activity'):
+                sub['last_child_activity'] = str(evidence['child_activity'])
             if evidence.get('known_child_ids'):
                 sub['known_child_ids'] = sorted(set(sub.get('known_child_ids') or []) | set(evidence['known_child_ids']))[:200]
             native = evidence.get('native') if isinstance(evidence.get('native'), dict) else None
@@ -1821,12 +1829,21 @@ class Observer:
             and evidence.get('anchor_proof'))
         evidence['started_evidence'] = self._started_evidence(sub, evidence)
         evidence['started'] = bool(evidence['started_evidence'])
+        child_stream = _canonical([
+            [str(child.get('id') or ''), str(child.get('activity') or '')]
+            for child in children if isinstance(child, dict)
+            and child.get('activity')])
+        evidence['child_activity'] = (
+            hashlib.sha256(child_stream.encode('utf-8')).hexdigest()[:16]
+            if child_stream else '')
         active_digest = _canonical([
             [(_item_id(job), _job_state(job)) for job in jobs],
             [(row.get('run_id'), row.get('status')) for row in run_rows],
             [(_item_id(child), _child_state(child)) for child in children],
+            evidence['child_activity'],
         ])
-        digest = _obs_digest(status, turn_count, evidence['final_message_id'], active_digest)
+        digest = _obs_digest(status, turn_count, evidence['final_message_id'],
+                             active_digest, evidence.get('message_activity') or '')
         previous = sub.get('last_sample_digest') or ''
         stable_samples = min(2, int(sub.get('stable_samples') or 0) + 1) if digest == previous and previous else 1
         evidence['sample_digest'] = digest
@@ -1940,6 +1957,7 @@ class Observer:
         final_after_anchor = False
         before_id = str(turn.get('before_message_id') or '')
         last_assistant = ''
+        last_assistant_message = None
 
         # ZCode 3.18 returns a no-cursor session/messages page oldest-first,
         # and its first row can be a visible model-change timeline_event.
@@ -1985,6 +2003,7 @@ class Observer:
                         pass
                 if ident:
                     last_assistant = ident
+                    last_assistant_message = message
 
         if native_started_id:
             anchor_proof = anchor_proof or 'native_turn_started'
@@ -2006,8 +2025,10 @@ class Observer:
                 final_after_anchor = True
         if native_completed and final_message_id:
             final_after_anchor = True
+        activity = message_activity_digest(last_assistant_message) if final_message_id else ''
         return {'anchor_proof': anchor_proof, 'user_message_id': user_message_id,
-                'final_message_id': final_message_id, 'final_after_anchor': final_after_anchor}
+                'final_message_id': final_message_id, 'final_after_anchor': final_after_anchor,
+                'message_activity': activity}
 
     def _started_evidence(self, sub, evidence):
         turn = sub.get('turn') or {}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1 — 2026-11-15
+
+- 修复技术权限被误判为认证问题：`zcode_agent_answer` 不再对整个请求参数序列化后做凭证子串扫描。`interaction/requestPermission` 按真实技术权限处理；用户问题只检查实际题面、header、选项文案与题面自身的 sensitive 标志，工作流脚本、路径、变量名和日志里的 `token`/`password` 等文本不再阻断 `allow_once`。真正的 password/API token/OAuth 问题仍需用户本人回答，未知用户问题结构仍保守拒绝。
+- 修复工作流持续推进时误报 `stalled`：父会话 idle 且 messageId 不变时，job 按 run 保存同 epoch 的游标水位，只有稳定 epoch 内严格前进才刷新；不变、倒退、重排、epoch/成员往返或轮询本身不伪造进度，epoch 变更只建立新基线；新 epoch 首 cursor 单独落盘，不刷新 `last_progress.at`、不清除读失败，后续同 epoch 严格增加才是真进度。订阅路径复用观察器持久化的 `run_cursors`，无订阅路径复用已读 run rows，并都参考子会话 ID 与子快照 `eventSeq`/`stateRevision` 摘要。`run.status=running` 本身不会刷新计时，真正无变化仍超时 `stalled`，有新进展时从 `stalled` 恢复。`workflowRunEvents` 读取失败不会被吞成 cursor 0 进展，连续失败仍可达 `unobservable`；成功读取会打断连续失败计数。真实 pending 优先于读失败诊断，终态仍最高优先，通知唤醒边界不变。
+- 消息进展只持久化无正文摘要（角色、part 类型、工具名/状态、文本长度与哈希），不保存消息正文、路径、provider 或凭据；观测字段长度有界，超长活动串保留前缀并对完整值做哈希，避免截断漏报。
+- 新增 34 项定向回归：engine/native CreateWorkflow 技术权限、真实凭证问题与未知结构的负对照、订阅与无订阅的 cursor 进展/真静默/恢复、同 messageId 内容更新、读取失败不刷新、终态优先。全量 514 项通过。
+
 ## 0.5.0 — 2026-11-15
 
 - 根代理独立完成 480 项回归和两侧 ZIP 隐私检查。实机验证原生实际编码任务结束后接回原 Codex chat、真实 AskUserQuestion → `zcode_agent_answer(CHECK-B)` → 同一页工具运行/最终输出、仅一次完成投递、真实 report-only MCP 调用以及 DWF 子代理运行中/完成内容读取；具体层级和未覆盖边界见 `docs/VALIDATION.md`。

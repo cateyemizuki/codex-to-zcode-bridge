@@ -16,7 +16,8 @@ from .desktop import session_visibility
 from .storage import (config, configured_default_workspace, defaults, read_json,
                       save_config, state_dir, write_json)
 from .workflows import topology
-from .identity import is_visible_message, message_identity
+from .identity import (is_visible_message, message_activity_digest,
+                       message_identity)
 from .notifications import (NotificationStore, Observer, has_anchor_proof,
                             make_input_id, subscription_anchor, TERMINAL_STATES)
 from .delivery import DeliveryWorker
@@ -868,6 +869,34 @@ class Bridge:
             return str(ident) if ident else ''
         return ''
 
+    def _tail_activity(self, sid, deadline=None, snapshot=None):
+        """Return the visible tail message id and a body-free activity digest.
+
+        This is the one cheap progress read used by unsubscribed polling.  It
+        never returns message text; only a digest of role/part shapes/tool
+        names/text lengths is kept so that a streaming update under the same
+        message id is still observable.
+        """
+        native = self._is_native(sid)
+        if native:
+            rows = self._native_tail_rows(sid, deadline, snapshot)
+        else:
+            try:
+                rows = self.rpc('session/messages', {'sessionId': sid, 'limit': 20},
+                                deadline).get('messages') or []
+            except Exception:
+                return '', '', False
+        for message in reversed(rows):
+            if not is_visible_message(message):
+                continue
+            ident = message_identity(message)
+            if native and not ident:
+                raise DesktopNativeError('native_snapshot_messages_invalid',
+                                         'native tail message has no stable message id')
+            return (str(ident) if ident else '',
+                    message_activity_digest(message), True)
+        return '', '', True
+
     def _last_user_message_id(self, sid, deadline=None, snapshot=None):
         native = self._is_native(sid)
         if native:
@@ -916,8 +945,12 @@ class Bridge:
             result = topology(run_id, events)
             result.update(after_sequence=cursor or 0, more=more)
             return result
-        except Exception:
-            return {**topology(run_id, []), 'after_sequence': 0, 'more': False}
+        except Exception as error:
+            # A failed journal read is not an empty journal.  Callers must not
+            # turn cursor 0 into progress; the error type lets polling count
+            # the read failure while keeping the previous watermark.
+            return {**topology(run_id, []), 'after_sequence': 0, 'more': False,
+                    'read_error': type(error).__name__}
 
     def _children_evidence(self, sid, deadline=None, strict=False, allow_unstarted=False):
         try:
@@ -945,12 +978,18 @@ class Bridge:
                 children.append({'id': child_id, 'projection_status': 'unverified'})
                 continue
             status = 'unverified'
+            activity = ''
             try:
                 snap = self.snapshot(child_id, deadline)
-                status = str((snap.get('projection') or {}).get('status') or 'unknown')
+                projection = snap.get('projection') or {}
+                status = str(projection.get('status') or 'unknown')
+                activity = self._child_activity(snap)
             except Exception:
                 pass
-            children.append({'id': child_id, 'projection_status': status})
+            row = {'id': child_id, 'projection_status': status}
+            if activity:
+                row['activity'] = activity
+            children.append(row)
         return children, child_ids
 
     def _run_rows(self, sid, deadline=None, strict=False):
@@ -964,17 +1003,22 @@ class Bridge:
             settled = status in ('completed', 'complete', 'succeeded', 'success', 'settled',
                                  'failed', 'error', 'cancelled', 'canceled', 'stopped')
             cursor = 0
+            read_error = ''
             if not settled and calls < 5:
                 calls += 1
                 topo = self.observe_run_topology(sid, run_id, deadline)
                 cursor = int(topo.get('after_sequence') or 0)
+                read_error = str(topo.get('read_error') or '')
                 if topo.get('status') not in (None, '', 'unknown'):
                     status = str(topo['status']).lower()
                     settled = status in ('completed', 'complete', 'succeeded', 'success',
                                          'settled', 'failed', 'error', 'cancelled', 'canceled',
                                          'stopped')
-            rows.append({'run_id': run_id, 'status': status or 'unknown', 'settled': settled,
-                         'cursor': cursor})
+            row = {'run_id': run_id, 'status': status or 'unknown', 'settled': settled,
+                   'cursor': cursor}
+            if read_error:
+                row['read_error'] = read_error
+            rows.append(row)
         return rows, len(raw_runs) >= 64
 
     def _baseline(self, sid, snapshot, deadline=None, run_rows=None, run_truncated=None,
@@ -2513,6 +2557,206 @@ class Bridge:
         except Exception:
             pass
 
+    @staticmethod
+    def _bounded_activity(text, limit=150):
+        """Keep an audit prefix but hash the full value so changes are never cut away."""
+        text = str(text or '')
+        if len(text) <= limit:
+            return text
+        digest = hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]
+        return text[:limit - 13] + '#' + digest
+
+    @staticmethod
+    def _cursors_from_subscription(run_cursors, current_epoch=''):
+        """Return the current ``run_id -> {epoch, cursor}`` view.
+
+        When the subscription knows its current native/engine epoch, keys from
+        that epoch are preferred; otherwise the last inserted entry for a run
+        id wins.  This avoids leftover epochs being treated as progress.
+        """
+        result = {}
+        if not isinstance(run_cursors, dict):
+            return result
+        entries = list(run_cursors.items())
+        if current_epoch:
+            prefix = str(current_epoch) + ':'
+            preferred = [(key, value) for key, value in entries
+                         if str(key).startswith(prefix)]
+            if preferred:
+                entries = preferred
+        for key, value in entries:
+            full = str(key)
+            epoch, run_id = (full.rsplit(':', 1) if ':' in full else ('', full))
+            if not run_id:
+                continue
+            try:
+                cursor = max(0, int(value or 0))
+            except (TypeError, ValueError):
+                cursor = 0
+            result[run_id] = {'epoch': epoch, 'cursor': cursor}
+        return result
+
+    @staticmethod
+    def _snapshot_epoch(snapshot):
+        """Best-effort stream/engine epoch for unsubscribed run cursors."""
+        runtime = (snapshot or {}).get('runtime') if isinstance(snapshot, dict) else None
+        if not isinstance(runtime, dict):
+            return ''
+        for key in ('streamId', 'serverInstanceId', 'sessionStreamId',
+                    'instanceId', 'engineInstanceId'):
+            if runtime.get(key):
+                return str(runtime[key])
+        if runtime.get('identity'):
+            return 'native:' + str(runtime['identity']) + ':' + str(
+                runtime.get('generation') or '')
+        return ''
+
+    @staticmethod
+    def _cursors_from_runs(runs, epoch=''):
+        """Parse already-read run rows into ``run_id -> {epoch, cursor}``.
+
+        A failed journal read row is skipped: its cursor 0 is not an observed
+        value and must not replace the previous watermark.
+        """
+        result = {}
+        for row in runs or ():
+            if not isinstance(row, dict) or row.get('read_error'):
+                continue
+            run_id = str(row.get('run_id') or '')
+            if not run_id:
+                continue
+            try:
+                cursor = max(0, int(row.get('cursor') or 0))
+            except (TypeError, ValueError):
+                cursor = 0
+            result[run_id] = {'epoch': str(epoch or ''), 'cursor': cursor}
+        return result
+
+    @staticmethod
+    def _normalize_previous_watermarks(previous):
+        """Normalize stored watermarks, including the earlier flat-key shape."""
+        result = {}
+        if not isinstance(previous, dict):
+            return result
+        for key, value in previous.items():
+            if isinstance(value, dict):
+                run_id = str(key)
+                epoch = str(value.get('epoch') or '')
+                try:
+                    cursor = max(0, int(value.get('cursor') or 0))
+                except (TypeError, ValueError):
+                    cursor = 0
+            else:
+                full = str(key)
+                epoch, run_id = (full.rsplit(':', 1) if ':' in full else ('', full))
+                try:
+                    cursor = max(0, int(value or 0))
+                except (TypeError, ValueError):
+                    cursor = 0
+            if run_id:
+                result[run_id] = {'epoch': epoch, 'cursor': cursor}
+        return result
+
+    @classmethod
+    def _advance_watermarks(cls, previous, current):
+        """Advance per-run cursors only on real progress.
+
+        Same epoch: only a strictly greater cursor advances.  Epoch change:
+        the new epoch establishes a baseline without advancing, even when its
+        first cursor is higher; only a later strictly greater cursor in that
+        same epoch advances.  New run: only a cursor above zero advances.
+        Backward, unchanged, reordered, epoch churn and read-failure cursor 0
+        never fabricate progress.
+        """
+        merged = cls._normalize_previous_watermarks(previous)
+        advanced = False
+        for run_id, entry in (current or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            run_id = str(run_id)
+            if not run_id:
+                continue
+            epoch = str(entry.get('epoch') or '')
+            try:
+                cursor = max(0, int(entry.get('cursor') or 0))
+            except (TypeError, ValueError):
+                cursor = 0
+            old = merged.get(run_id)
+            if old is None:
+                if cursor > 0:
+                    advanced = True
+                merged[run_id] = {'epoch': epoch, 'cursor': cursor}
+            elif epoch != old['epoch']:
+                # An epoch change is a new fact, not progress by itself.  The
+                # new epoch starts a fresh baseline; only a later strictly
+                # greater cursor within that same epoch advances.  This keeps
+                # epoch churn from replaying old values forever.
+                merged[run_id] = {'epoch': epoch, 'cursor': cursor}
+            else:
+                if cursor > old['cursor']:
+                    advanced = True
+                merged[run_id] = {'epoch': epoch,
+                                  'cursor': max(old['cursor'], cursor)}
+        if len(merged) > 128:
+            merged = dict(sorted(merged.items())[:128])
+        return advanced, merged
+
+    @staticmethod
+    def _child_activity(snapshot):
+        """Small, body-free progress metadata from an already-read child snapshot.
+
+        Only scalar projection/runtime/session fields are copied; messages and
+        any other content are ignored.  ``eventSeq``/``stateRevision`` keep
+        same-message-id streaming observable without reading child bodies.
+        """
+        if not isinstance(snapshot, dict):
+            return ''
+        parts = []
+        for container_name, keys in (
+                ('projection', ('status', 'turnCount', 'eventSeq', 'lastEventSeq',
+                                'lastMessageId', 'currentTurnId')),
+                ('runtime', ('stateRevision', 'eventSeq', 'lastEventSeq', 'generation')),
+                ('session', ('eventSeq', 'lastEventSeq', 'stateRevision'))):
+            container = snapshot.get(container_name)
+            if not isinstance(container, dict):
+                continue
+            for key in keys:
+                value = container.get(key)
+                if value is None or isinstance(value, (dict, list)):
+                    continue
+                parts.append(container_name + '.' + key + '=' + str(value)[:64])
+        return Bridge._bounded_activity(';'.join(parts), limit=140)
+
+    @staticmethod
+    def _activity_from_children(child_ids):
+        return Bridge._bounded_activity(
+            ','.join(sorted(str(value) for value in child_ids or () if value)))
+
+    @staticmethod
+    def _merge_activity(progress, updates):
+        """Merge available activity sources without losing known values.
+
+        ``None`` means the source could not be read this time; the previous
+        value is preserved so a read failure is never mistaken for progress.
+        Returns ``(changed, activity)``.
+        """
+        previous = progress.get('activity') if isinstance(progress, dict) else {}
+        previous = previous if isinstance(previous, dict) else {}
+        merged = {str(key): str(value)[:160] for key, value in previous.items()
+                  if value is not None and str(value) != ''}
+        changed = False
+        for key, value in updates.items():
+            if value is None:
+                continue
+            value = str(value)[:160]
+            if str(previous.get(key) or '') != value:
+                changed = True
+            if value:
+                merged[str(key)] = value
+            else:
+                merged.pop(str(key), None)
+        return changed, merged
+
     def sync_superagent_jobs(self, now=None):
         """Map persisted subscription truth to job verdicts and diagnostics.
 
@@ -2577,14 +2821,39 @@ class Bridge:
             if job.get('status') == 'unobservable':
                 job = self.superagent.transition(
                     job_id, thread, 'running', 'observer_recovered', 'job.resumed') or job
+            progress = job.get('last_progress') or {}
             observed = (str(sub.get('last_status') or ''),
                         str(sub.get('last_message_id') or ''))
-            progress = job.get('last_progress') or {}
+            native_state = sub.get('native') if isinstance(sub.get('native'), dict) else {}
+            previous_watermarks = progress.get('run_watermarks')
+            cursor_advanced, watermarks = self._advance_watermarks(
+                previous_watermarks,
+                self._cursors_from_subscription(
+                    sub.get('run_cursors'), native_state.get('epoch') or ''))
+            baseline_changed = (self._normalize_previous_watermarks(previous_watermarks)
+                                != watermarks)
+            activity_changed, activity = self._merge_activity(progress, {
+                'children': self._activity_from_children(sub.get('known_child_ids')),
+                'child_stream': str(sub.get('last_child_activity') or ''),
+                'message': str(sub.get('last_message_activity') or ''),
+            })
             if observed != (str(progress.get('status') or ''),
-                            str(progress.get('message_id') or '')):
+                            str(progress.get('message_id') or '')) \
+                    or cursor_advanced or activity_changed:
+                # Only a strictly forward same-epoch cursor, real child/message
+                # activity or a parent status change refreshes the stall clock;
+                # a run merely staying "running" does not.
                 job = self.superagent.record_progress(
                     job_id, thread, kind='observer', message_id=observed[1],
-                    status=observed[0]) or job
+                    status=observed[0], activity=activity,
+                    run_watermarks=watermarks, at=now) or job
+                progress = job.get('last_progress') or {}
+            elif baseline_changed:
+                # A new epoch's first cursor is a new fact, not progress.  Keep
+                # it so the next same-epoch increase is measurable, but do not
+                # refresh ``last_progress.at`` or clear read failures.
+                job = self.superagent.update_run_watermarks(
+                    job_id, thread, watermarks) or job
                 progress = job.get('last_progress') or {}
             last_at = float(progress.get('at') or job.get('created_at') or now)
             if job.get('status') == 'running' and now - last_at >= stall_seconds:
@@ -2636,38 +2905,54 @@ class Bridge:
                 self.superagent.transition(job_id, thread, 'unobservable',
                                            'read_failures', 'job.unobservable')
             return
+        runs_ok = True
+        read_failure_count = 0
         try:
             runs, _ = self._run_rows(sid, strict=True)
         except Exception:
-            runs = []
-            self.superagent.record_read_failure(job_id, thread,
-                                                'workflow_read_failed')
+            runs, runs_ok = [], False
+            read_failure_count = self.superagent.record_read_failure(
+                job_id, thread, 'workflow_read_failed')
+        else:
+            journal_error = next(
+                (str(row.get('read_error')) for row in runs
+                 if isinstance(row, dict) and row.get('read_error')), '')
+            if journal_error:
+                read_failure_count = self.superagent.record_read_failure(
+                    job_id, thread, journal_error)
         projection = snapshot.get('projection') or {}
         engine_status = str(projection.get('status') or '').lower()
         active_background = self._active_background(snapshot, runs)
         tail_read_error = ''
+        tail_ok = True
         try:
-            last_message_id = str(self._last_message_id(sid, snapshot=snapshot) or '')
+            last_message_id, message_activity, tail_ok = self._tail_activity(
+                sid, snapshot=snapshot)
+            last_message_id = str(last_message_id or '')
+            if not tail_ok:
+                tail_read_error = 'messages_unreadable'
+                read_failure_count = max(
+                    read_failure_count,
+                    self.superagent.record_read_failure(job_id, thread, tail_read_error))
         except Exception as error:
-            last_message_id = ''
+            last_message_id, message_activity = '', ''
+            tail_ok = False
             tail_read_error = type(error).__name__[:80]
-            self.superagent.record_read_failure(job_id, thread, tail_read_error)
-        previous = job.get('last_progress') or {}
-        if ((engine_status, last_message_id) !=
-                (str(previous.get('status') or ''),
-                 str(previous.get('message_id') or ''))):
-            job = self.superagent.record_progress(
-                job_id, thread, kind='poll', message_id=last_message_id,
-                status=engine_status) or job
-            previous = job.get('last_progress') or {}
-        engine_idle = (engine_status in ('idle', 'completed')
-                       and not active_background and not tail_read_error)
-        self.superagent.update_job(job_id, thread, observation={
-            'checked_at': now, 'engine_status': engine_status,
-            'engine_idle': engine_idle, 'active_background': active_background,
-            'last_message_id': last_message_id,
-            **({'read_error': tail_read_error} if tail_read_error else {})})
-        job = self.superagent.get(job_id, thread) or job
+            read_failure_count = max(
+                read_failure_count,
+                self.superagent.record_read_failure(job_id, thread, tail_read_error))
+        # A new child session is progress too.  This is one lightweight list
+        # read, not child message bodies; failure keeps the previous value.
+        child_ids = None
+        try:
+            child_rows = self.rpc('session/subagents',
+                                  {'sessionId': sid, 'endedLimit': 30}) or {}
+            child_ids = [str(value) for value in child_rows.get('childSessionIds') or ()
+                         if value]
+        except Exception:
+            child_ids = None
+        # Definite terminal engine truth outranks degraded reads: a failed
+        # workflow read must never hide a failed or cancelled turn.
         if engine_status in ('error', 'failed'):
             if job.get('queue'):
                 self.superagent.mark_queue_not_delivered(job_id, thread, 'engine_error')
@@ -2680,14 +2965,85 @@ class Bridge:
             self.superagent.transition(job_id, thread, 'cancelled',
                                        'engine_cancelled', 'job.cancelled')
             return
+        # A real pending request outranks read-failure diagnostics.  Only the
+        # live pending set may clear it; a failed read is never proof that the
+        # question was resolved.
         sessions = self._discover_subtree(job, None)
         pending = (self._native_questions_from_snapshot(snapshot, sid)
                    if self._is_native(sid)
                    else self._pending_for_job(job, None, sessions))
+        observation = {
+            'checked_at': now, 'engine_status': engine_status,
+            'engine_idle': (engine_status in ('idle', 'completed')
+                            and not active_background and not tail_read_error
+                            and not pending),
+            'active_background': active_background,
+            'last_message_id': last_message_id,
+            **({'read_error': tail_read_error} if tail_read_error else {})}
         if pending:
+            self.superagent.update_job(job_id, thread, observation=observation)
             self.superagent.transition(job_id, thread, 'action_required',
                                        'pending_request', 'job.action_required')
             return
+        if read_failure_count >= failure_threshold:
+            # Keep the poll throttle: an unobservable job must not re-read
+            # every observer tick.
+            self.superagent.update_job(job_id, thread, observation={
+                **observation, 'engine_idle': False,
+                'read_error': tail_read_error or 'read_failures'})
+            self.superagent.transition(job_id, thread, 'unobservable',
+                                       'read_failures', 'job.unobservable')
+            return
+        previous = job.get('last_progress') or {}
+        # A strictly forward same-epoch cursor and same-id message/tool updates
+        # are real progress; an idle parent with a static tail is not.  An
+        # unreadable source contributes None and therefore preserves the
+        # previous value.
+        previous_watermarks = previous.get('run_watermarks')
+        if runs_ok:
+            cursor_advanced, watermarks = self._advance_watermarks(
+                previous_watermarks,
+                self._cursors_from_runs(runs, self._snapshot_epoch(snapshot)))
+        else:
+            cursor_advanced = False
+            watermarks = previous_watermarks or {}
+        baseline_changed = runs_ok and (
+            self._normalize_previous_watermarks(previous_watermarks) != watermarks)
+        if read_failure_count == 0 and runs_ok and tail_ok and not baseline_changed:
+            # A successful read breaks the consecutive-failure streak even
+            # when it observes no new progress.  A new-epoch baseline alone
+            # must not clear it.
+            self.superagent.reset_read_failures(job_id, thread)
+            previous = job.get('last_progress') or {}
+        activity_changed, activity = self._merge_activity(previous, {
+            'children': (self._activity_from_children(child_ids)
+                         if child_ids is not None else None),
+            'message': ((last_message_id + '#' + message_activity)
+                        if tail_ok and last_message_id else ('' if tail_ok else None)),
+        })
+        status_changed = engine_status != str(previous.get('status') or '')
+        message_changed = bool(tail_ok) and (
+            last_message_id != str(previous.get('message_id') or ''))
+        if status_changed or message_changed or cursor_advanced or activity_changed:
+            # The first observation establishes a baseline, not a fresh
+            # progress timestamp: a job that was already silent for a full
+            # stall window before its first poll must still time out.
+            record_at = (now if previous.get('at') is not None
+                         else float(job.get('created_at') or now))
+            job = self.superagent.record_progress(
+                job_id, thread, kind='poll', message_id=last_message_id,
+                status=engine_status, activity=activity,
+                run_watermarks=watermarks, at=record_at,
+                reset_failures=(read_failure_count == 0)) or job
+            previous = job.get('last_progress') or {}
+        elif baseline_changed:
+            # Persist a new epoch/membership baseline only.  This must not
+            # refresh the stall clock or clear a read-failure streak.
+            job = self.superagent.update_run_watermarks(
+                job_id, thread, watermarks) or job
+            previous = job.get('last_progress') or {}
+        self.superagent.update_job(job_id, thread, observation=observation)
+        job = self.superagent.get(job_id, thread) or job
         if str(job.get('status')) == 'action_required':
             job = self.superagent.transition(
                 job_id, thread, 'running', 'action_resolved', 'job.resumed') or job
@@ -2938,17 +3294,83 @@ class Bridge:
             'desktop_sync': self.desktop_sync_status(),
         }
 
+    # Credential and preference wording is classified only from the actual
+    # human-facing question copy.  Tool arguments, workflow code, paths,
+    # variable names and logs are data, never an authentication question.
+    AUTH_QUESTION_MARKERS = (
+        'password', 'passcode', 'passphrase', 'api key', 'api_key', 'api-key',
+        'api token', 'api_token', 'access token', 'access_token',
+        'auth token', 'auth_token', 'refresh token', 'refresh_token',
+        'bearer token', 'bearer_token', 'id token', 'id_token',
+        'client secret', 'client_secret', 'secret key', 'secret_key',
+        'private key', 'private_key', 'token', 'secret', 'oauth',
+        'log in', 'login', 'sign in', 'signin', 'credential', 'authenticate',
+        'authentication', 'authurl', '密码', '口令', '登录', '凭证', '鉴权',
+    )
+    PREFERENCE_QUESTION_MARKERS = (
+        'prefer', 'preference', 'favorite', 'favourite', 'which do you',
+        'your choice', '偏好', '你喜欢',
+    )
+
+    @classmethod
+    def _question_copy(cls, request):
+        """Return only the human-authored question/option copy of a request.
+
+        Notification and permission payloads carry real tool input, including
+        workflow scripts.  Only question rows, headers and option labels or
+        descriptions are human questions; option ``value`` and any other
+        parameter are machine data.
+        """
+        pieces = []
+        for row in cls._request_questions(request):
+            for key in ('question', 'header'):
+                value = row.get(key)
+                if isinstance(value, str) and value.strip():
+                    pieces.append(value)
+            options = row.get('options')
+            if isinstance(options, list):
+                for option in options:
+                    if not isinstance(option, dict):
+                        continue
+                    for key in ('label', 'description'):
+                        value = option.get(key)
+                        if isinstance(value, str) and value.strip():
+                            pieces.append(value)
+        return '\n'.join(pieces).lower()
+
+    @classmethod
+    def _question_has_sensitive_flag(cls, request):
+        """True when the real question row itself marks its input sensitive."""
+        for row in cls._request_questions(request):
+            if any(row.get(key) is True for key in
+                   ('sensitive', 'secret', 'isSecret', 'password')):
+                return True
+        return False
+
     def _requires_user_answer(self, request, args):
-        params = request.get('params') if isinstance(request.get('params'), dict) else {}
-        text = json.dumps(params, ensure_ascii=False, default=str).lower()
-        auth_markers = ('password', 'passcode', 'api key', 'api_key', 'token', 'secret',
-                        'oauth', 'log in', 'login', 'sign in', 'credential',
-                        'authenticate', 'authentication', 'authurl')
-        if any(marker in text for marker in auth_markers):
+        """True only when the actual human question needs the person's answer.
+
+        ``interaction/requestPermission`` is a technical tool approval: its
+        input is arbitrary code/data and it never supplies credentials, so it
+        is classified by ``_authorize_native_permission`` or the engine's real
+        option mapping instead.  User-input questions are classified from the
+        question copy and the row's own sensitive flag alone.  An unreadable
+        user-input structure stays conservative: without a question we cannot
+        prove it is not a credential prompt.
+        """
+        if str(request.get('method') or '') == 'interaction/requestPermission':
+            return False
+        questions = self._request_questions(request)
+        if not questions:
             return True
-        preference_markers = ('prefer', 'preference', 'favorite', 'favourite',
-                              'which do you', 'your choice', '偏好', '你喜欢')
-        if any(marker in text for marker in preference_markers) \
+        if self._question_has_sensitive_flag(request):
+            return True
+        text = self._question_copy(request)
+        if not text:
+            return True
+        if any(marker in text for marker in self.AUTH_QUESTION_MARKERS):
+            return True
+        if any(marker in text for marker in self.PREFERENCE_QUESTION_MARKERS) \
                 and args.get('user_approved') is not True:
             return True
         return False

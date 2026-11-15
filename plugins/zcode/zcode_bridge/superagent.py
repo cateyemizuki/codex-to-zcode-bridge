@@ -756,7 +756,8 @@ class SuperagentStore:
                 'cursor': {'after_message_id': '', 'event_cursor': 0},
                 'queue': [],
                 'delivered_messages': [],
-                'last_progress': {'at': None, 'kind': '', 'message_id': '', 'status': ''},
+                'last_progress': {'at': None, 'kind': '', 'message_id': '', 'status': '',
+                                  'activity': {}, 'run_watermarks': {}},
                 'read_failures': {'consecutive': 0, 'last_error_type': '', 'last_at': None},
                 'observation': {'checked_at': None, 'engine_status': '',
                                 'engine_idle': False, 'active_background': None,
@@ -892,17 +893,69 @@ class SuperagentStore:
             self._save_locked()
             return copy.deepcopy(job)
 
-    def record_progress(self, job_id, thread_id, *, kind='', message_id='', status=''):
-        """Record the last observable progress and reset read-failure counters."""
-        now = float(self.clock())
+    @staticmethod
+    def _normalize_watermarks(value):
+        """Bound the per-run ``{run_id: {epoch, cursor}}`` watermark map."""
+        rows = []
+        for key, entry in value.items():
+            if isinstance(entry, dict):
+                run_id = str(key)[:200]
+                epoch = str(entry.get('epoch') or '')[:200]
+                try:
+                    cursor = max(0, int(entry.get('cursor') or 0))
+                except (TypeError, ValueError):
+                    continue
+            else:
+                # Migrate the earlier flat ``epoch:run_id -> cursor`` shape.
+                full = str(key)
+                epoch, run_id = (full.rsplit(':', 1) if ':' in full else ('', full))
+                try:
+                    cursor = max(0, int(entry or 0))
+                except (TypeError, ValueError):
+                    continue
+            if not run_id:
+                continue
+            rows.append((run_id[:200], {'epoch': epoch, 'cursor': cursor}))
+        return dict(sorted(rows)[:128])
+
+    def record_progress(self, job_id, thread_id, *, kind='', message_id='', status='',
+                        activity=None, run_watermarks=None, at=None,
+                        reset_failures=True):
+        """Record the last observable progress and reset read-failure counters.
+
+        ``activity`` is a compact, body-free dict (known child ids, child stream
+        metadata and a message activity digest).  ``run_watermarks`` is the
+        per-epoch/per-run cursor high-water map; the caller only advances it
+        for strictly forward cursors.  Passing either as ``None`` preserves
+        the previous value because callers such as ``inspect`` observe without
+        re-reading workflows.  ``at`` keeps the stall window deterministic for
+        a caller with an explicit sync clock.  ``reset_failures=False`` keeps a
+        concurrent read-failure streak visible while still recording a real
+        parent/message change.
+        """
+        now = float(at if at is not None else self.clock())
         progress = {'at': now, 'kind': str(kind or '')[:40],
                     'message_id': str(message_id or '')[:160], 'status': str(status or '')[:40]}
+        if isinstance(activity, dict):
+            progress['activity'] = {str(key)[:24]: str(value)[:160]
+                                    for key, value in activity.items()
+                                    if value is not None and str(value) != ''}
+        if isinstance(run_watermarks, dict):
+            progress['run_watermarks'] = self._normalize_watermarks(run_watermarks)
         with self.lock:
             job = self._get_locked(job_id, thread_id)
             if job is None:
                 return None
+            previous = job.get('last_progress') or {}
+            if not isinstance(activity, dict) and isinstance(previous.get('activity'), dict):
+                progress['activity'] = copy.deepcopy(previous['activity'])
+            if not isinstance(run_watermarks, dict) \
+                    and isinstance(previous.get('run_watermarks'), dict):
+                progress['run_watermarks'] = copy.deepcopy(previous['run_watermarks'])
             job['last_progress'] = progress
-            job['read_failures'] = {'consecutive': 0, 'last_error_type': '', 'last_at': None}
+            if reset_failures:
+                job['read_failures'] = {'consecutive': 0, 'last_error_type': '',
+                                        'last_at': None}
             job['updated_at'] = now
             self._save_locked(now)
             return copy.deepcopy(job)
@@ -923,11 +976,34 @@ class SuperagentStore:
             self._save_locked(now)
             return failures['consecutive']
 
-    def reset_read_failures(self, job_id, thread_id):
+    def update_run_watermarks(self, job_id, thread_id, watermarks):
+        """Persist a new epoch/membership baseline without refreshing progress.
+
+        A new epoch's first cursor is a new fact, not progress: ``last_progress.at``,
+        the activity dict and the read-failure streak stay unchanged.  A later
+        strictly greater cursor in that epoch goes through ``record_progress``.
+        """
+        now = float(self.clock())
         with self.lock:
             job = self._get_locked(job_id, thread_id)
             if job is None:
                 return None
+            progress = dict(job.get('last_progress') or {})
+            progress['run_watermarks'] = self._normalize_watermarks(watermarks)
+            job['last_progress'] = progress
+            job['updated_at'] = now
+            self._save_locked(now)
+            return copy.deepcopy(job)
+
+    def reset_read_failures(self, job_id, thread_id):
+        """A clean read breaks the consecutive-failure streak without progress."""
+        with self.lock:
+            job = self._get_locked(job_id, thread_id)
+            if job is None:
+                return None
+            failures = job.get('read_failures') or {}
+            if int(failures.get('consecutive') or 0) == 0:
+                return copy.deepcopy(job)
             job['read_failures'] = {'consecutive': 0, 'last_error_type': '', 'last_at': None}
             job['updated_at'] = float(self.clock())
             self._save_locked()

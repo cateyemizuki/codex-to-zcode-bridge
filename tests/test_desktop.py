@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'runtime'))
 from zcode_bridge.desktop import session_visibility
-from zcode_bridge.service import Bridge
+from bridge_fixtures import MockBridge as Bridge
 
 
 class DesktopTests(unittest.TestCase):
@@ -25,37 +25,36 @@ class DesktopTests(unittest.TestCase):
         self.temp.cleanup()
 
     def test_running_desktop_is_never_reopened_by_default(self):
-        with patch('zcode_bridge.service.desktop_running', return_value=True), \
+        with patch('zcode_bridge.service.ensure_desktop', return_value={
+                'running':True,'pid':1,'already_running':True,'launched':False}), \
                 patch('zcode_bridge.service.subprocess.Popen') as spawn:
             self.assertFalse(Bridge().launch(force=True)['workspace_open_requested'])
             spawn.assert_not_called()
 
     def test_workspace_open_requires_focus_acknowledgement(self):
-        with patch('zcode_bridge.service.subprocess.Popen') as spawn:
+        with patch('zcode_bridge.service.ensure_desktop') as ensure:
             with self.assertRaisesRegex(ValueError, 'allow_focus'):
                 Bridge().launch(workspace=str(self.root))
-            spawn.assert_not_called()
+            ensure.assert_not_called()
 
-    def test_explicit_open_forwards_native_absolute_workspace(self):
-        executable = self.root/'ZCode.exe'
-        executable.touch()
-        with patch('zcode_bridge.service.config', return_value={'zcode_executable': str(executable)}), \
-                patch('zcode_bridge.service.desktop_running', return_value=True), \
+    def test_explicit_open_uses_native_ui_without_another_process(self):
+        with patch('zcode_bridge.service.ensure_desktop', return_value={
+                'running':True,'pid':1,'already_running':True,'launched':False}), \
                 patch('zcode_bridge.service.subprocess.Popen') as spawn:
             result = Bridge().launch(workspace=str(self.root/'sub/..'), allow_focus=True)
-            self.assertEqual(spawn.call_args.args[0], [str(executable), '--open-workspace', str(self.root)])
-            self.assertTrue(result['may_focus'])
+            self.assertTrue(result['needs_native_ui'])
+            self.assertFalse(result['workspace_open_requested'])
+            spawn.assert_not_called()
 
     def test_creating_a_session_never_opens_a_project(self):
         bridge = Bridge()
-        bridge.rpc = Mock(return_value={'session': {'sessionId':'sess_unit'}, 'projection': {},
-            'runtime': {}, 'settings': {'model': {'current':{'providerId':'p','modelId':'m'}}}})
+        bridge._native_create_session = Mock(return_value={'native':True})
         bridge.launch = Mock()
-        with patch('zcode_bridge.service.session_visibility', return_value={'indexed':False}):
-            result = bridge.call('zcode_create_session', {'workspace': str(self.root), 'caller_permission_mode':'full_access',
-                'model':{'providerId':'p','modelId':'m'}, 'thought_level':'high'})
+        result = bridge.call('zcode_create_session', {
+            'workspace':str(self.root),'caller_permission_mode':'full_access',
+            'model':{'providerId':'p','modelId':'m'},'thought_level':'high'})
         bridge.launch.assert_not_called()
-        self.assertFalse(result['desktop']['indexed'])
+        self.assertTrue(result['native'])
 
     def create_catalogue(self):
         db = self.root/'.zcode/v2/tasks-index.sqlite'

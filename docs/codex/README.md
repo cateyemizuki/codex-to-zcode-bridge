@@ -2,7 +2,7 @@
 
 本机 stdio MCP 插件，提供 32 项控制工具、2 项原生设置工具（共 34 项），以及内嵌配置面板。GPT 侧没有 skill，也不需要复制 ZCode 的完整工作流说明。推荐用 `zcode_delegate` 一次创建/派发/可选订阅，再用 `zcode_agent_message/inspect/answer/cancel` 跟进；旧 28 项工具保持兼容。
 
-0.5.3 的 Desktop 控制配置默认使用工作区黑名单，只禁用 C 盘及其子路径；已有白名单可显式迁移。规则和升级边界见 [工作区规则](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/WORKSPACE_POLICY.md)。
+0.5.4 的 Desktop 控制配置默认使用工作区黑名单，只禁用 C 盘及其子路径；已有白名单可显式迁移。规则和升级边界见 [工作区规则](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/WORKSPACE_POLICY.md)。
 
 ## 手动安装
 
@@ -38,7 +38,7 @@ python install.py
 
 为子代理单独选模型和思考强度时，通常创建 `onDemand` 会话，发送 `/workflow` 自然语言任务，说明范围、阶段、并行、依赖、模型和验收。首次动态工作流授权仍须处理真实请求。
 
-默认 `engine` 使用独立引擎，桌面列表不会实时接收后续新会话或新消息；核心保存和 `desktop.indexed` 不等于界面已显示。从完整仓库按 [原版接入与回滚](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md) 或复制件路线准备兼容 Host 后，可在可视设置中选择 `desktop_native`、启用原生后端并填写本机 control 文件，让新任务由 Desktop 自己执行。3.18.2 原版已实测新会话按工作区关联已有项目，以及同页问答、工具运行、最终输出和真实完成唤醒。未归属“任务”分组可能折叠；先核对返回的项目归属，不自动展开或强制刷新。默认 ZIP 不自动修改 ZCode，不接管旧 SID；跨版本、setter、后台取消和 MCP 注入等边界见原生模式说明。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。消息读取兼容 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`，长会话使用真实分页游标。
+0.5.4 默认且仅支持正式 ZCode Desktop 的原生会话。已运行就复用唯一主进程；未运行时只按配置启动已安装的主程序。会话与后续消息由 Desktop 自动更新，无需旧的 Desktop 补同步开关。独立引擎、复制件任务和显式 `engine` 已禁用；接入缺失、实例不唯一或不支持的操作明确报错。安装门禁及回滚见 [正式安装说明](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md)，默认值和自动更新见 [桌面连接](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_ONLY.md)。
 
 ## 完成通知与续工
 
@@ -90,7 +90,7 @@ python install.py
 不使用安装器时，先准备本机 Python 服务，再使用标准 Codex 插件命令：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.3#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.4#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```

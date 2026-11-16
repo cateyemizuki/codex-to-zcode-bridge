@@ -169,6 +169,7 @@ import * as __zcodeSyncCrypto from 'node:crypto';
       ok: true,
       ready: Boolean(syncer()),
       pid: process.pid,
+      desktopExecutable: process.execPath,
       allowedWorkspaceCount: policy.mode === 'allowlist' ? policy.pathCount : 0,
       workspacePolicyMode: policy.mode,
       blockedPathCount: policy.mode === 'blacklist' ? policy.pathCount : 0,

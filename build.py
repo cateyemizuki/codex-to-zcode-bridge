@@ -9,7 +9,7 @@ from pathlib import Path
 from scripts.installer import mcp_server_config
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.5.3'
+VERSION = '0.5.4'
 MARKET = 'codex-to-zcode-bridge-plugins'
 REPOSITORY = 'https://github.com/cateyemizuki/codex-to-zcode-bridge'
 

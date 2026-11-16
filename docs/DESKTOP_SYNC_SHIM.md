@@ -1,5 +1,7 @@
 # ZCode Desktop 实时同步实验 shim（可选、可回滚）
 
+> 历史路线：0.5.4 的正常任务仅使用正式 Desktop 原生宿主，不再使用独立引擎、复制件或此旧补同步入口。当前使用方式见 [桌面连接](DESKTOP_ONLY.md)。
+
 本文件描述一个**实验性、默认不安装**的 JS 层修复：它只作用于调用方显式指定的
 ZCode Desktop 完整复制件，用来验证独立 engine 写入的会话事实能否通过 Desktop
 自己的 host 进程进入 `tasks-index.sqlite`、发布 host 内的会话列表变更事件，并让

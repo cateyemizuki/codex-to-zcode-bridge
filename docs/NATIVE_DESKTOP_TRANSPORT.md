@@ -1,6 +1,6 @@
-# Experimental native Desktop transport
+# Desktop-owned native transport
 
-This opt-in transport is for **new sessions owned by the patched Desktop's own engine**.
+Version 0.5.4 supports only **new sessions owned by the installed Desktop's own host**.
 It does not attach, resume or migrate sessions created by an independent Bridge engine.
 It is separate from the existing `probe` and `sync` operations, which remain compatible.
 
@@ -15,8 +15,10 @@ are unchanged. These tools do not start Desktop or perform GUI acceptance.
 
 ## Enable in a private configuration
 
-Prepare a copy and private `control.json` using the existing Desktop shim instructions.
-Native operations are disabled by default. For an explicitly chosen private config:
+Prepare the formal installed Desktop and private `control.json` using
+[the version/hash-gated installation procedure](DESKTOP_NATIVE_INSTALL.md).
+Plugin native routing is enabled by default; the private host control must also
+enable native operations. For an explicitly chosen private config:
 
 ```text
 python scripts/desktop_sync_shim.py native-config --config <private-control.json> --mode enabled

@@ -131,8 +131,9 @@ def main(source=None):
             if not args.codex:
                 raise RuntimeError('Codex CLI was not found. Files are prepared; use --codex or --no-register and the manual instructions.')
             entries = command([args.codex,'plugin','marketplace','list','--json']).get('marketplaces',[])
-            existing = next((e for e in entries if e.get('name')==MARKET),None)
-            if existing and Path(existing['root']).resolve()!=root:
+            matching = [entry for entry in entries if entry.get('name') == MARKET]
+            existing = next((entry for entry in matching if Path(entry['root']).resolve() == root), None)
+            if matching and existing is None:
                 raise ValueError('Marketplace name already points elsewhere; existing registration was preserved')
             if not existing:
                 command([args.codex,'plugin','marketplace','add',root,'--json'])

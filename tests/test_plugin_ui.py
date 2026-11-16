@@ -41,8 +41,8 @@ class NativeSettingsTests(unittest.TestCase):
                     'desktop_native_control_file'):
             self.assertIn(key, result['schema']['properties'])
             self.assertIn(key, result['values'])
-        self.assertEqual(result['values']['default_transport'], 'engine')
-        self.assertTrue(any(group.get('title','').startswith('会话后端')
+        self.assertEqual(result['values']['default_transport'], 'desktop_native')
+        self.assertTrue(any(group.get('title','').startswith('桌面原生')
                             for group in result.get('layout') or []))
 
     def test_native_updates_only_changed_fields(self):
@@ -64,7 +64,7 @@ class NativeSettingsTests(unittest.TestCase):
             return self.cfg
         with patch('zcode_bridge.preferences.local_call',side_effect=call):
             result=preferences.read()
-        self.assertIn('node_executable',result['schema']['properties'])
+        self.assertIn('zcode_executable',result['schema']['properties'])
         self.assertIn('连接未就绪',result['values']['default_model'])
 
     def test_native_model_change_resolves_label_and_compatible_effort(self):
@@ -115,23 +115,17 @@ class NativeSettingsTests(unittest.TestCase):
                         {'completion_notify_start_timeout_seconds':'120'}):
             with self.assertRaises(ValueError): preferences.update({'set':changes})
 
-    def test_superagent_diagnostics_and_desktop_sync_are_visible_and_bounded(self):
+    def test_diagnostics_are_visible_and_legacy_sync_is_removed(self):
         result=preferences.read()
-        for key in (*preferences.SUPERAGENT_TITLES,*preferences.DESKTOP_SYNC_TITLES):
+        for key in preferences.SUPERAGENT_TITLES:
             self.assertIn(key,result['schema']['properties'])
             self.assertIn(key,result['values'])
-        self.assertFalse(result['values']['desktop_sync_enabled'])
-        self.assertEqual(result['values']['desktop_sync_min_interval_seconds'],5)
+        self.assertNotIn('desktop_sync_enabled',result['values'])
         self.assertEqual(result['values']['superagent_stall_seconds'],600)
         updated=preferences.update({'set':{
-            'desktop_sync_enabled':True,
-            'desktop_sync_control_file':str(Path(tempfile.gettempdir())/'private-control.json'),
-            'desktop_sync_min_interval_seconds':7,
             'superagent_stall_seconds':120,
             'superagent_read_failure_threshold':3,
         }})
-        self.assertTrue(updated['values']['desktop_sync_enabled'])
-        self.assertEqual(updated['values']['desktop_sync_min_interval_seconds'],7)
         self.assertEqual(updated['values']['superagent_stall_seconds'],120)
         self.assertEqual(updated['values']['superagent_read_failure_threshold'],3)
         for changes in ({'desktop_sync_enabled':'true'},
@@ -167,9 +161,9 @@ class NativeSettingsTests(unittest.TestCase):
             self.assertIn(key,text)
         self.assertIn('无可观测进展判定（秒）',text)
         self.assertIn('连续读取失败阈值',text)
-        self.assertIn('启用 Desktop 同步',text)
-        self.assertIn('Desktop 同步最小间隔（秒）',text)
-        self.assertIn('token 只从私有控制文件读取',text)
+        self.assertNotIn('启用 Desktop 同步',text)
+        self.assertNotIn('Desktop 同步最小间隔（秒）',text)
+        self.assertIn('消息与状态由桌面自动更新',text)
 
 
 if __name__=='__main__': unittest.main()

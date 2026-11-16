@@ -6,9 +6,7 @@ from .storage import NOTIFY_RANGES, SUPERAGENT_RANGES
 READ_TOOL = 'zcode_preferences_read'
 UPDATE_TOOL = 'zcode_preferences_update'
 CAPABILITY = {'readTool':READ_TOOL, 'updateTool':UPDATE_TOOL}
-PATH_TITLES = {'zcode_executable':'ZCode 程序','engine_entry':'ZCode 引擎',
-    'node_executable':'Node 程序（留空时自动查找）', 'builtin_provider_file':'内置模型配置文件',
-    'personal_provider_file':'个人模型配置文件'}
+PATH_TITLES = {'zcode_executable':'已安装的 ZCode 主程序'}
 NOTIFY_TITLES = {
     'completion_notify_poll_seconds':'通知轮询间隔（秒）',
     'completion_notify_start_timeout_seconds':'轮次启动等待上限（秒）',
@@ -22,14 +20,9 @@ SUPERAGENT_TITLES = {
     'superagent_stall_seconds':'无可观测进展判定（秒）',
     'superagent_read_failure_threshold':'连续读取失败阈值',
 }
-DESKTOP_SYNC_TITLES = {
-    'desktop_sync_enabled':'启用 Desktop 同步（可选）',
-    'desktop_sync_control_file':'Desktop 同步私有控制文件',
-    'desktop_sync_min_interval_seconds':'Desktop 同步最小间隔（秒）',
-}
 NATIVE_TITLES = {
     'default_transport':'会话后端',
-    'desktop_native_enabled':'启用桌面原生后端（实验）',
+    'desktop_native_enabled':'桌面原生接入',
     'desktop_native_control_file':'桌面原生私有控制文件',
 }
 
@@ -77,8 +70,8 @@ def read():
     values = effective_values(cfg, choices)
     for key in NOTIFY_TITLES:
         values.setdefault(key, cfg.get(key, NOTIFY_DEFAULTS[key]))
-    for key, fallback in (('default_transport','engine'),
-                          ('desktop_native_enabled',False),
+    for key, fallback in (('default_transport','desktop_native'),
+                          ('desktop_native_enabled',True),
                           ('desktop_native_control_file','')):
         values.setdefault(key, cfg.get(key, fallback))
     options = list(choices)
@@ -102,22 +95,13 @@ def read():
                 'maximum':NOTIFY_RANGES[key][1]} for key,title in NOTIFY_TITLES.items()},
         **{key:{'type':'integer','title':title,'minimum':SUPERAGENT_RANGES[key][0],
                 'maximum':SUPERAGENT_RANGES[key][1]} for key,title in SUPERAGENT_TITLES.items()},
-        'desktop_sync_enabled':{'type':'boolean','title':DESKTOP_SYNC_TITLES['desktop_sync_enabled'],
-            'description':'默认关闭；只有显式开启并配置私有控制文件时才连接本机回环 sync。'},
-        'desktop_sync_control_file':{'type':'string',
-            'title':DESKTOP_SYNC_TITLES['desktop_sync_control_file'],
-            'description':'本机私有 control.json 路径；token 只由该文件读取，不进入设置值或工具响应。'},
-        'desktop_sync_min_interval_seconds':{'type':'integer',
-            'title':DESKTOP_SYNC_TITLES['desktop_sync_min_interval_seconds'],
-            'minimum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][0],
-            'maximum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][1]},
         'default_transport':{'type':'string','title':NATIVE_TITLES['default_transport'],
-            'enum':['engine','desktop_native'],
-            'description':'独立引擎（默认，兼容旧工具）或桌面原生（实验）。'
+            'enum':['desktop_native'],'readOnly':True,
+            'description':'仅使用唯一正式 ZCode Desktop 的原生会话。'
                           '当前桌面原生状态：'+native_state+'；选择后失败会明确报错，不会静默换回独立引擎。'},
         'desktop_native_enabled':{'type':'boolean',
-            'title':NATIVE_TITLES['desktop_native_enabled'],
-            'description':'默认关闭。仅对显式选择 desktop_native 的新会话生效；不会自动打开项目或重启 Desktop。'},
+            'title':NATIVE_TITLES['desktop_native_enabled'],'readOnly':True,
+            'description':'默认启用。桌面接入不可用时明确报错，不会另起引擎或副本。'},
         'desktop_native_control_file':{'type':'string',
             'title':NATIVE_TITLES['desktop_native_control_file'],
             'description':'本机私有 control.json 路径；必须已启用 nativeTransport。token 不进入设置值或工具响应。'},
@@ -128,12 +112,10 @@ def read():
     return {'schema':{'type':'object','properties':properties},'values':values,'layout':[
         {'kind':'group','title':'模型与工作区','items':[{'kind':'property','property':key} for key in
             ('default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop')]},
-        {'kind':'group','title':'会话后端（桌面原生为实验）','items':[{'kind':'property','property':key} for key in
-            ('default_transport','desktop_native_enabled','desktop_native_control_file')]},
+        {'kind':'group','title':'桌面原生连接','items':[{'kind':'property','property':key} for key in
+            ('desktop_native_control_file',)]},
         {'kind':'group','title':'Superagent 自动回传','items':[{'kind':'property','property':key} for key in
             SUPERAGENT_TITLES]},
-        {'kind':'group','title':'Desktop 同步（可选）','items':[{'kind':'property','property':key} for key in
-            ('desktop_sync_enabled','desktop_sync_control_file','desktop_sync_min_interval_seconds')]},
         {'kind':'group','title':'完成通知（运营参数）','items':[{'kind':'property','property':key} for key in NOTIFY_TITLES]},
         {'kind':'group','title':'配置与会话面板','items':[{'kind':'tool','tool':'zcode_open_settings'}]},
         {'kind':'group','title':'本机程序路径','items':[{'kind':'property','property':key} for key in PATH_TITLES]},
@@ -146,16 +128,16 @@ def update(arguments):
         raise ValueError('set 必须包含要更新的配置项')
     cfg, choices = catalogue()
     allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop',
-        *PATH_TITLES,*NOTIFY_TITLES,*SUPERAGENT_TITLES,*DESKTOP_SYNC_TITLES,*NATIVE_TITLES}
+        *PATH_TITLES,*NOTIFY_TITLES,*SUPERAGENT_TITLES,*NATIVE_TITLES}
     if set(changes)-allowed:
         raise ValueError('未知配置项')
     changes = copy.deepcopy(changes)
     for key,value in changes.items():
-        if key in ('auto_launch_desktop','desktop_sync_enabled','desktop_native_enabled'):
+        if key in ('auto_launch_desktop','desktop_native_enabled'):
             if type(value) is not bool:
                 raise ValueError('配置值类型错误：'+key)
         elif key == 'default_transport':
-            if value not in ('engine','desktop_native'):
+            if value != 'desktop_native':
                 raise ValueError('会话后端无效：'+str(value))
         elif key in NOTIFY_RANGES or key in SUPERAGENT_RANGES:
             low, high = (NOTIFY_RANGES.get(key) or SUPERAGENT_RANGES[key])
@@ -184,8 +166,8 @@ def update(arguments):
     # a person's edit. Model-driven updates still use zcode_settings + caller mode.
     saved = local_call('zcode_settings',{'changes':changes,'caller_permission_mode':'full_access'})
     values = effective_values(saved, choices)
-    for key, fallback in (('default_transport','engine'),
-                          ('desktop_native_enabled',False),
+    for key, fallback in (('default_transport','desktop_native'),
+                          ('desktop_native_enabled',True),
                           ('desktop_native_control_file','')):
         values.setdefault(key, saved.get(key, fallback))
     return {'values':values}
@@ -194,9 +176,8 @@ def update(arguments):
 def definitions():
     types = {'default_workspace':{'type':'string'},'default_model':{'type':'string'},
         'default_thought_level':{'type':'string'},'default_workflow_mode':{'type':'string','enum':['onDemand','alwaysOn','disabled']},
-        'auto_launch_desktop':{'type':'boolean'},'desktop_sync_enabled':{'type':'boolean'},
-        'desktop_sync_control_file':{'type':'string'},
-        'default_transport':{'type':'string','enum':['engine','desktop_native']},
+        'auto_launch_desktop':{'type':'boolean'},
+        'default_transport':{'type':'string','enum':['desktop_native'],'readOnly':True},
         'desktop_native_enabled':{'type':'boolean'},
         'desktop_native_control_file':{'type':'string'},
         **{k:{'type':'string'} for k in PATH_TITLES},
@@ -204,9 +185,8 @@ def definitions():
                 'maximum':NOTIFY_RANGES[key][1]} for key in NOTIFY_TITLES},
         **{key:{'type':'integer','minimum':SUPERAGENT_RANGES[key][0],
                 'maximum':SUPERAGENT_RANGES[key][1]} for key in SUPERAGENT_TITLES},
-        'desktop_sync_min_interval_seconds':{'type':'integer',
-            'minimum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][0],
-            'maximum':SUPERAGENT_RANGES['desktop_sync_min_interval_seconds'][1]}}
+        }
+
     meta = {'ui':{'visibility':['app']},'openai/widgetAccessible':True}
     return [
         {'name':READ_TOOL,'title':'读取插件设置','description':'Read native ChatGPT/Codex plugin settings schema, values and layout.',

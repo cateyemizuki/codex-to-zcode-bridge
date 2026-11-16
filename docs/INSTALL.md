@@ -10,7 +10,7 @@ agent 协助：将根 README 的安装提示词交给拥有本机文件和命令
 
 发布包不保存固定 Python、ZCode、Node 或工作区路径。安装器在本机生成绝对路径的 MCP 文件，以避免不同 Python 环境混淆；这些文件属于本地安装结果。
 
-自动寻找顺序包括显式环境变量、系统注册信息、常见应用目录。找不到时传入 `--zcode-executable "<实际可执行文件>"`；只有引擎位置已知时传 `--engine-entry "<实际 zcode.cjs>"`。`--workspace` 要求现有目录，不会创建任意工作区。
+自动寻找顺序包括显式环境变量、系统注册信息、常见应用目录。找不到时传入 `--zcode-executable "<实际可执行文件>"`；新任务只使用正式 Desktop 原生宿主，不通过引擎路径另起任务。`--workspace` 要求现有目录，不会创建任意工作区。
 
 可选环境变量：`ZCODE_INSTALL_DIR`、`ZCODE_EXECUTABLE`、`ZCODE_ENGINE_ENTRY`、`ZCODE_NODE_EXECUTABLE`、`ZCODE_WORKSPACE`、`ZCODE_BUILTIN_PROVIDER_FILE`、`ZCODE_PERSONAL_PROVIDER_FILE`、`ZCODE_MODEL_PROVIDER`、`ZCODE_MODEL_ID`。它们是本机输入，不应放进 Git。
 
@@ -35,7 +35,7 @@ Codex 的 MCP 启动环境需要显式转发宿主连接信息。Codex 侧原始
 
 安装器将本次实际使用的状态目录写入本机 MCP 配置的 `env.ZCODE_BRIDGE_STATE`，避免客户端过滤环境后切换到另一份配置。升级时保留该目录；更新两侧且原先指向不同状态目录时，需要显式选择 `ZCODE_BRIDGE_STATE`，不会自动合并两份会话或配置。
 
-## 高层子代理与 Desktop 同步配置
+## 高层子代理与桌面连接配置
 
 高层 `zcode_delegate`/`zcode_agent_message`/`zcode_agent_inspect`/`zcode_agent_answer`/`zcode_agent_cancel`/`zcode_agent_report` 使用本机 `superagent.json` 保存 job、队列、cursor、事件和连续读取失败计数；不要手工编辑该文件。旧 28 个工具仍兼容。
 
@@ -44,11 +44,11 @@ Codex 的 MCP 启动环境需要显式转发宿主连接信息。Codex 侧原始
 - `superagent_profiles` / `superagent_default_profile`：可选 profile；模型和思考强度仍会用真实 catalog 校验。
 - `superagent_stall_seconds`：默认 600，范围 60–86400；长时间无可观测进展映射为 `stalled`。
 - `superagent_read_failure_threshold`：默认 5，范围 2–50；连续读取失败映射为 `unobservable`。
-- `desktop_sync_enabled`：默认 `false`；不会自动连接 Desktop。
-- `desktop_sync_control_file`：可选私有 `control.json` 路径，默认空；token 只从该文件读取，不进入设置值、工具响应、提示词或日志。
-- `desktop_sync_min_interval_seconds`：默认 5，范围 1–300；按 workspace 合并/节流。
+- `default_transport`：固定为 `desktop_native`；新任务不接受 `engine`。
+- `desktop_native_enabled`：默认 `true`。
+- `desktop_native_control_file`：正式 Desktop 的私有 `control.json` 路径；token 不进入设置值、工具响应、提示词或日志。
 
-Desktop 同步的可选补丁工具不在默认插件包里，也不随安装器自动执行：`scripts/desktop_sync_copy.py`、`scripts/desktop_sync_shim.py`、`scripts/desktop_sync_probe.py` 和 `runtime/desktop_sync/` 只从仓库取得。需要时按 [DESKTOP_SYNC_SHIM.md](DESKTOP_SYNC_SHIM.md) 的版本/SHA-256 门禁复制隔离副本、生成私有 control 文件并显式启动；补丁工具保持可选，额外准备步骤和回滚步骤见该文档。探针默认只读，sync 需要 `--confirm-sync`，不打开项目、不抢焦点、不打印 token。
+0.5.4 默认且仅使用正式 Desktop 原生宿主。需从完整仓库按 [正式接入](DESKTOP_NATIVE_INSTALL.md) 完成版本与哈希门禁，配置私有 control 文件。旧的复制件和独立引擎补同步仅保留历史资料，不属于正常安装或任务路线；不会自动回退使用。
 
 要作用于原版安装目录本身而不是复制件时，使用独立的显式入口 `python scripts/desktop_native_install.py`：安装、回滚、自动更新失效检查与尚未验证项见 [DESKTOP_NATIVE_INSTALL.md](DESKTOP_NATIVE_INSTALL.md)。
 
@@ -82,7 +82,7 @@ ZCode 侧使用自己的市场命令。其宿主支持插件根目录变量，�
 
 ## 升级与移除
 
-从新版仓库或 ZIP 重新执行安装器。相同安装位置会先备份原插件再更新；已有配置与 provider 凭据保留。当前发布版本为 0.5.3；状态返回的 `bridge_version` 可用于确认实际运行版本，单独重载 MCP 不需要重启 ZCode 桌面。两侧使用同一个控制服务，升级不要强制结束正在运行的会话。已运行的旧控制服务可能仍使用旧代码；先等该服务管理的任务结束，再重新载入桥接服务。MCP 环境转发配置也要由新进程加载，单次临时宿主上下文恢复不能代替重载后的验收。
+从新版仓库或 ZIP 重新执行安装器。相同安装位置会先备份原插件再更新；已有配置与 provider 凭据保留。当前发布版本为 0.5.4；状态返回的 `bridge_version` 可用于确认实际运行版本，单独重载 MCP 不需要重启 ZCode 桌面。两侧使用同一个控制服务，升级不要强制结束正在运行的会话。已运行的旧控制服务可能仍使用旧代码；先等该服务管理的任务结束，再重新载入桥接服务。MCP 环境转发配置也要由新进程加载，单次临时宿主上下文恢复不能代替重载后的验收。
 
 Desktop 新工作区黑名单还需要新版 shim，重载 MCP 本身不会替换旧 Desktop 进程中的 JS。新配置默认只禁用 C 盘及其子路径；现有白名单按 [工作区规则](WORKSPACE_POLICY.md) 显式迁移并保留原有认证和 ownership。
 

@@ -58,8 +58,8 @@ def defaults():
         'desktop_sync_min_interval_seconds': 5,
         # Optional Desktop-owned native backend.  Disabled by default; selecting
         # it never falls back to the independent engine.
-        'default_transport': 'engine',
-        'desktop_native_enabled': False,
+        'default_transport': 'desktop_native',
+        'desktop_native_enabled': True,
         'desktop_native_control_file': '',
         'auto_launch_desktop': os.name == 'nt',
         # Completion-notification operations only.  There is deliberately no
@@ -91,7 +91,14 @@ def config():
     saved = read_json(path, None) if path.exists() else {}
     if not isinstance(saved, dict):
         raise ValueError('桥接配置格式无效：config.json 必须是对象')
-    return {**defaults(), **saved}
+    result = {**defaults(), **saved}
+    # Preferences for new tasks migrate without taking ownership of old SIDs.
+    result['default_transport'] = 'desktop_native'
+    result['desktop_sync_enabled'] = False
+    for profile in (result.get('superagent_profiles') or {}).values():
+        if isinstance(profile, dict) and profile.get('transport') == 'engine':
+            profile['transport'] = 'desktop_native'
+    return result
 
 
 def configured_default_workspace(cfg=None):
@@ -169,7 +176,7 @@ def _save_config(changes):
         if 'workflow_mode' in row and row['workflow_mode'] not in (
                 'disabled', 'onDemand', 'alwaysOn'):
             raise ValueError('profile 工作流模式无效：' + name)
-        if 'transport' in row and row['transport'] not in ('engine', 'desktop_native'):
+        if 'transport' in row and row['transport'] != 'desktop_native':
             raise ValueError('profile 传输后端无效：' + name)
     default_profile = result['superagent_default_profile']
     if not isinstance(default_profile, str):
@@ -180,8 +187,10 @@ def _save_config(changes):
         raise ValueError('Desktop 同步开关必须是布尔值')
     if not isinstance(result['desktop_sync_control_file'], str):
         raise ValueError('Desktop 同步控制文件必须是字符串')
-    if result['default_transport'] not in ('engine', 'desktop_native'):
-        raise ValueError('默认传输后端无效')
+    if result['default_transport'] != 'desktop_native':
+        raise ValueError('independent_engine_disabled: 只支持桌面原生后端')
+    if changes.get('desktop_sync_enabled') is True:
+        raise ValueError('legacy_desktop_sync_disabled: 原生桌面会话不使用旧补同步功能')
     if type(result['desktop_native_enabled']) is not bool:
         raise ValueError('桌面原生开关必须是布尔值')
     if not isinstance(result['desktop_native_control_file'], str):

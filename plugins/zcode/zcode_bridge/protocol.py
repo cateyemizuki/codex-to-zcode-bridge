@@ -19,25 +19,7 @@ class ProtocolError(RuntimeError):
 
 class Client:
     def __init__(self, config, on_request, on_event):
-        self.pending = {}
-        self.lock = threading.RLock()
-        self.errors = deque(maxlen=30)
-        self.on_request, self.on_event = on_request, on_event
-        entry = Path(config['engine_entry'])
-        env = dict(os.environ)
-        env.update({key:value for key,value in {
-            'ZCODE_BUILTIN_PROVIDER_CONFIG_FILE': config['builtin_provider_file'],
-            'ZCODE_PERSONAL_PROVIDER_CONFIG_FILE': config['personal_provider_file'],
-        }.items() if value})
-        node = config.get('node_executable') or shutil.which('node')
-        if not node or not entry.is_file():
-            raise RuntimeError('找不到 ZCode 引擎或 Node，请在配置页检查路径')
-        self.child = subprocess.Popen([node, str(entry), 'app-server', '--stdio'],
-            cwd=config['default_workspace'], env=env, stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-        threading.Thread(target=self._read, daemon=True).start()
-        threading.Thread(target=self._errors, daemon=True).start()
+        raise RuntimeError('independent_engine_disabled: only the installed Desktop host may execute ZCode sessions')
 
     def _read(self):
         try:

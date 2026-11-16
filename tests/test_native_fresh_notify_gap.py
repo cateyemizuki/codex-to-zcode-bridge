@@ -15,7 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 from zcode_bridge import storage
 from zcode_bridge.desktop_native import DesktopNativeError
 from zcode_bridge.protocol import ProtocolError
-from zcode_bridge.service import Bridge, is_session_not_found_error
+from zcode_bridge.service import is_session_not_found_error
+from bridge_fixtures import MockBridge as Bridge
 
 
 class NativeFreshNotifyGapTests(unittest.TestCase):

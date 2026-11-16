@@ -55,12 +55,13 @@ class DesktopNativeError(RuntimeError):
 class DesktopNativeAdapter:
     """Synchronous, explicit native transport client (no background worker)."""
 
-    def __init__(self, settings_getter=None, clock=time.time):
+    def __init__(self, settings_getter=None, clock=time.time, ensure_desktop=None):
         self.settings_getter = settings_getter or (lambda: {})
         self.clock = clock
         self._sync = DesktopSyncAdapter(settings_getter=settings_getter, clock=clock)
         self._lock = threading.RLock()
         self._last = {'op': '', 'state': '', 'at': None, 'session_id': ''}
+        self.ensure_desktop = ensure_desktop
 
     # ------------------------------------------------------------------ config
     def _settings(self):
@@ -121,6 +122,8 @@ class DesktopNativeAdapter:
         message.update(fields)
         control = self._control()
         message['workspace'] = self._workspace(control, workspace)
+        if self.ensure_desktop is not None:
+            self.ensure_desktop(allow_start=op in ('native_create', 'native_model_catalog'))
         if op not in OPERATIONS:
             raise DesktopNativeError('unsupported', 'native operation is not allowlisted')
         try:
@@ -263,6 +266,13 @@ class DesktopNativeAdapter:
                              {'session_id': session_id})
 
     # ------------------------------------------------------------------ status
+    def probe(self):
+        try:
+            control = self._control()
+            return self._sync._call(control, {'op': 'probe'})
+        except (DesktopNativeError, DesktopSyncError):
+            return {'ok': False, 'ready': False}
+
     def status(self):
         """Token-free, path-free status safe for a tool response."""
         settings = self._settings()

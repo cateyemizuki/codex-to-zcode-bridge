@@ -15,7 +15,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 from zcode_bridge import notifications, storage
-from zcode_bridge.service import Bridge
+from bridge_fixtures import MockBridge as Bridge
 
 SID = 'sess_test'
 CTX_A = {'thread_id': 'chat-A', 'thread_origin': 'turn_metadata'}

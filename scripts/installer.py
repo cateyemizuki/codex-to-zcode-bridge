@@ -10,6 +10,21 @@ from pathlib import Path
 
 MARKET = 'codex-to-zcode-bridge-plugins'
 PLUGIN = 'codex-to-zcode-bridge'
+CODEX_HOST_ENV_VARS = (
+    'CODEX_APP_TOOLS_PIPE_PATH',
+    'CODEX_APP_RUNTIME_CLI_PATH',
+    'CODEX_MCP_NODE_PATH',
+)
+
+
+def mcp_server_config(host, executable, arguments):
+    server = {'command': str(executable), 'args': list(arguments)}
+    if host == 'codex':
+        # Codex sanitizes the environment of MCP subprocesses. Forward the
+        # current host capability by name, never bake its local values into a
+        # package or installation manifest. ZCode does not own that capability.
+        server['env_vars'] = list(CODEX_HOST_ENV_VARS)
+    return server
 
 
 def write(path, data):
@@ -56,8 +71,21 @@ def main(source=None):
     for host, folder in sources.items():
         if not (folder/'bridge.py').is_file():
             parser.error('Missing built '+host+' package; run python build.py first')
+    if not os.environ.get('ZCODE_BRIDGE_STATE'):
+        previous_states = set()
+        for host in hosts:
+            installed = root/'plugins'/host
+            if (installed/'_host.json').is_file() and (installed/'.mcp.json').is_file():
+                previous = json.loads((installed/'.mcp.json').read_text(encoding='utf-8'))
+                previous_state = previous.get('mcpServers',{}).get('zcode_bridge',{}).get('env',{}).get('ZCODE_BRIDGE_STATE')
+                if isinstance(previous_state,str) and previous_state:
+                    previous_states.add(str(Path(previous_state).expanduser().resolve()))
+        if len(previous_states) > 1:
+            parser.error('Installed hosts use different state directories; set ZCODE_BRIDGE_STATE explicitly before updating both')
+        if previous_states:
+            os.environ['ZCODE_BRIDGE_STATE'] = previous_states.pop()
     sys.path.insert(0,str(next(iter(sources.values()))))
-    from zcode_bridge.storage import config, save_config
+    from zcode_bridge.storage import config, save_config, state_dir
     cfg = config() if not args.dry_run else {}
     changes = {k:getattr(args,k) for k in ('zcode_executable','engine_entry','node_executable') if getattr(args,k)}
     if args.workspace:
@@ -86,8 +114,9 @@ def main(source=None):
         if identity.is_file():
             shutil.copytree(destination,backup/host,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
         shutil.copytree(folder,destination,dirs_exist_ok=True,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
-        write(destination/'.mcp.json',{'mcpServers':{'zcode_bridge':{
-            'command':sys.executable,'args':[str(destination/'bridge.py'),'mcp']}}})
+        server = mcp_server_config(host, sys.executable, [str(destination/'bridge.py'),'mcp'])
+        server['env'] = {'ZCODE_BRIDGE_STATE':str(state_dir().resolve())}
+        write(destination/'.mcp.json',{'mcpServers':{'zcode_bridge':server}})
     if changes:
         cfg = save_config(changes)
     if 'codex' in hosts:

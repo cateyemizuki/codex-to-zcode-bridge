@@ -2,7 +2,7 @@
 
 让 ChatGPT / Codex 和其他支持本机 MCP 的 agent 工具调用本机 ZCode：选择已有模型、在指定工作区创建会话、派发任务、读取主代理和子代理结果、处理问题与授权，并使用 ZCode 的原生动态工作流。任务完成后，桥接可以持久记录完成事件，并在版本支持的 Codex Desktop 上尝试唤醒原 chat 继续验收。
 
-本仓库提供两个独立安装包，版本 **0.5.1**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。0.5.1 的两项运行期修复见 [RUNTIME_FIX_051.md](docs/RUNTIME_FIX_051.md)。
+本仓库提供两个独立安装包，版本 **0.5.2**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。本版增加原版 Desktop 的显式可回滚接入、按工作区匹配已有项目，并修复通知环境转发和可恢复工作流状态；见 [本版说明](docs/RUNTIME_FIX_052.md)。旧版记录保留在 [RUNTIME_FIX_051.md](docs/RUNTIME_FIX_051.md)。
 
 | 安装包 | 用途 | 说明 |
 | --- | --- | --- |
@@ -41,7 +41,7 @@
 ## 兼容性与已知限制
 
 - **消息 ID/分页**：同时接受 ZCode 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；`after_message_id` 使用同一解析，不会因为字段改名变成 null。两者都没有时保留调用方 anchor，不伪造 ID。
-- **实时 UI**：默认独立引擎只负责核心会话持久化，不会向已打开的 Desktop 项目推送新会话或新消息；`desktop.indexed` 只表示索引收录。实验性的 `desktop_native` 后端让新任务由 Desktop 自己的引擎执行，已在 3.18.2 完整复制件上验证同一页问答、工具运行和最终输出，无需手工刷新。它需要另行安装版本/哈希门禁的 Host，不由默认插件自动启用，不能接管旧独立引擎 SID。见下方原生模式与 [实机验证](docs/VALIDATION.md)。
+- **实时 UI**：默认独立引擎只负责核心会话持久化，不会向已打开的 Desktop 项目推送新会话或新消息；`desktop.indexed` 只表示索引收录。实验性的 `desktop_native` 让新任务由 Desktop 自己的引擎执行，已在 3.18.2 原版和复制件验证同页问答、工具运行与最终输出；本版原版新 SID 还能按工作区进入正确项目，无需手工刷新。它需要另行安装版本/哈希门禁的 Host，不由默认插件自动启用，不能接管旧独立引擎 SID。见下方原生模式与 [实机验证](docs/VALIDATION.md)。
 
 ## 安装前
 
@@ -58,7 +58,7 @@
 本机已有 Python、Node 和 ZCode 时，先安装 MCP 服务的 Python 包，再用 Codex 命令注册市场和安装插件：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.1#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.2#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```
@@ -85,7 +85,7 @@ python install.py --target both --zcode-executable "<ZCode 可执行文件的绝
 
 ### 从 ZIP 安装
 
-在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.1.zip` 或 `codex-to-zcode-bridge-zcode-0.5.1.zip`，解压后进入该目录，运行：
+在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.2.zip` 或 `codex-to-zcode-bridge-zcode-0.5.2.zip`，解压后进入该目录，运行：
 
 ```powershell
 python install.py
@@ -166,11 +166,13 @@ python scripts/desktop_sync_probe.py --control <private>/control.json --op sync 
 
 ## 实验性 Desktop 原生模式
 
-需要在 ZCode 页面中持续观察委派任务时，使用 `transport="desktop_native"` 创建新任务。先从完整仓库按 [Host 准备与回滚](docs/DESKTOP_SYNC_SHIM.md) 准备完整复制件，再按 [原生模式](docs/NATIVE_DESKTOP_TRANSPORT.md) 启用私有配置；在插件设置中选择 `desktop_native`、开启 `desktop_native_enabled` 并填写该机器的 `desktop_native_control_file`。默认 ZIP 只提供客户端适配器，不自动改动已安装的 ZCode，也不附带本地 token 或配置。
+需要在 ZCode 页面中持续观察委派任务时，使用 `transport="desktop_native"` 创建新任务。可从完整仓库按 [原版安装与回滚](docs/DESKTOP_NATIVE_INSTALL.md) 接入兼容的原版 Desktop；也保留 [完整复制件](docs/DESKTOP_SYNC_SHIM.md) 路线。按 [原生模式](docs/NATIVE_DESKTOP_TRANSPORT.md) 启用私有配置，在插件设置中选择 `desktop_native`、开启 `desktop_native_enabled` 并填写该机器的 `desktop_native_control_file`。默认 ZIP 只提供客户端适配器，不自动改动已安装的 ZCode，也不附带本地 token 或配置。
+
+原生新会话按工作区匹配唯一的已有本机项目；无匹配时明确未归属，多匹配时拒绝歧义，不猜项目名称、不创建新项目、不改旧会话。返回的 `project_assignment` / `projectAssignment` 是创建时的归属信息。未归属会话位于侧栏“任务”分组，可能折叠或在滚动区域下方；先检查分组再判断列表是否漏显示，桥接不会替用户展开或抢焦点。
 
 该模式支持显式模型与强度创建、输入、快照/分页历史、真实问题回答、父会话与 DWF 子代理只读内容、完成事件和版本支持的宿主续工。新 SID 固定绑定该 Desktop 实例；关闭、替换实例或 runtime 不可用时给出诊断，不转到独立 engine。模型/模式 setter、后台任务取消、会话级 report MCP 注入等尚未提供，调用会明确返回不支持。两种后端的能力边界见 [Host 契约](docs/NATIVE_HOST_INTEGRATION.md)。
 
-0.5.1 的独立回归为 514 项（含 42 项 Node 行为用例）；实机已覆盖原生实际编码任务完成后接回原 Codex chat、真实问答往返及同一页延迟工具执行、report-only MCP 调用和 DWF 子代理内容读取。列表出现可能有被动延迟，创建成功仍不代表列表此刻已经可见。
+0.5.2 的合并回归为 561 项；Node 行为套件含 52 项用例。原版启动、真实问答、同页延迟工具输出与完成唤醒已有实测记录；项目归属的实机范围以 [验证记录](docs/VALIDATION.md) 为准。创建成功、持久索引和 GUI 可见是分别验收的事实。
 
 ## 已知边界
 

@@ -36,11 +36,13 @@ python install.py
 
 为子代理单独选模型和思考强度时，通常创建 `onDemand` 会话，发送 `/workflow` 自然语言任务，说明范围、阶段、并行、依赖、模型和验收。首次动态工作流授权仍须处理真实请求。
 
-默认 `engine` 使用独立引擎，桌面列表不会实时接收后续新会话或新消息；核心保存和 `desktop.indexed` 不等于界面已显示。另行准备完整仓库提供的实验性 Host 复制件后，可在可视设置中选择 `desktop_native`、启用原生后端并填写本机 control 文件，让新任务由 Desktop 自己执行；3.18.2 已实测同一页问答、运行工具及最终输出。默认 ZIP 不自动修改 ZCode，不接管旧 SID；跨版本、setter、后台取消和 MCP 注入等边界见仓库原生模式说明。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。消息读取兼容 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`，长会话使用真实分页游标。
+默认 `engine` 使用独立引擎，桌面列表不会实时接收后续新会话或新消息；核心保存和 `desktop.indexed` 不等于界面已显示。从完整仓库按 [原版接入与回滚](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md) 或复制件路线准备兼容 Host 后，可在可视设置中选择 `desktop_native`、启用原生后端并填写本机 control 文件，让新任务由 Desktop 自己执行。3.18.2 原版已实测新会话按工作区关联已有项目，以及同页问答、工具运行、最终输出和真实完成唤醒。未归属“任务”分组可能折叠；先核对返回的项目归属，不自动展开或强制刷新。默认 ZIP 不自动修改 ZCode，不接管旧 SID；跨版本、setter、后台取消和 MCP 注入等边界见原生模式说明。只有明确请求 `zcode_launch` 打开工作区才可能使 ZCode 获得焦点，不能用它自动刷新。消息读取兼容 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`，长会话使用真实分页游标。
 
 ## 完成通知与续工
 
 完成订阅只在用户明确要求时建立，绑定当前 chat、目标 session 和当前轮次锚点。它不是全局通知开关，也不会改变 ZCode 的模型或权限。原生设置和内嵌面板可调 4 项运营参数：轮询间隔（默认 1 秒）、轮次启动等待（默认 120 秒）、订阅过期（默认 6 小时）、唤醒尝试次数（默认 5 次）；它们只影响观察和投递。
+
+本侧 MCP 配置通过 `env_vars` 转发 `CODEX_APP_TOOLS_PIPE_PATH`、`CODEX_APP_RUNTIME_CLI_PATH` 和 `CODEX_MCP_NODE_PATH`，只记录变量名，连接值由当前客户端在启动服务时提供。升级后须重载 MCP 插件，使新进程收到这些变量；缺少转发时，即使宿主工具可用，桥接也可能立即报告 `pipe_unavailable`。安装器在本机配置中保留状态目录，避免重载后切到另一份会话和设置。不要把连接值复制到仓库或提示词。
 
 ### 派发或补订阅
 
@@ -86,7 +88,7 @@ python install.py
 不使用安装器时，先准备本机 Python 服务，再使用标准 Codex 插件命令：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.1#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.2#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```

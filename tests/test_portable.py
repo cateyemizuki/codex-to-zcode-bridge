@@ -80,6 +80,13 @@ class PortableTests(unittest.TestCase):
         mcp=json.loads((target/'plugins'/host/'.mcp.json').read_text(encoding='utf-8'))['mcpServers']['zcode_bridge']
         self.assertEqual(mcp['command'],sys.executable)
         self.assertTrue(Path(mcp['args'][0]).is_relative_to(target))
+        self.assertEqual(mcp['env']['ZCODE_BRIDGE_STATE'], str(state.resolve()))
+        if host == 'codex':
+            self.assertEqual(set(mcp['env_vars']), {
+                'CODEX_APP_TOOLS_PIPE_PATH', 'CODEX_APP_RUNTIME_CLI_PATH',
+                'CODEX_MCP_NODE_PATH'})
+        else:
+            self.assertNotIn('env_vars', mcp)
         requests=[{'jsonrpc':'2.0','id':1,'method':'initialize','params':{}},
             {'jsonrpc':'2.0','id':2,'method':'tools/list','params':{}},
             {'jsonrpc':'2.0','id':3,'method':'resources/read','params':{'uri':'ui://codex-to-zcode-bridge/settings.html'}}]
@@ -87,7 +94,7 @@ class PortableTests(unittest.TestCase):
             cwd=base,env=env,capture_output=True,text=True,encoding='utf-8',timeout=20)
         self.assertEqual(process.returncode,0,process.stderr)
         replies={r['id']:r for r in map(json.loads,process.stdout.splitlines())}
-        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.5.1')
+        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.5.2')
         self.assertEqual(len(replies[2]['result']['tools']),34)
         self.assertIn('默认主代理模型',replies[3]['result']['contents'][0]['text'])
         self.assertFalse((state/'connection.json').exists(),'MCP discovery must not start an engine')

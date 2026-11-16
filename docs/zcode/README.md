@@ -2,6 +2,8 @@
 
 ZCode 插件，提供桥接管理用的原生 skill、`bridge-settings` 命令和同一套 34 项 MCP 工具（32 项控制工具 + 2 项原生设置工具）。两侧共用本机控制服务和配置。高层入口推荐 `zcode_delegate` + `zcode_agent_message/inspect/answer/cancel`；旧 28 项工具保持兼容。
 
+0.5.2 支持从完整仓库显式接入兼容的原版 Desktop，保留正常登录与 profile；默认安装器不修改应用。原生新会话按工作区复用唯一活动本机项目，无匹配时明确位于未归属“任务”分组，不自动展开用户分组。安装与回滚见 [原版说明](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md)。
+
 ## 手动安装
 
 需要本机 Python 3.10+、Node 和已安装的 ZCode。下载本侧 Release ZIP，解压后在目录中执行：
@@ -34,6 +36,7 @@ python install.py
 
 - 必须没有活动 workflow、background job 或子代理，没有新的待处理问题，连续稳定采样，并且锚点后出现新的最终结果，才记录 `turn.completed`。
 - `accepted`、首次 idle、waiting、error、paused、仍有运行中的 workflow/backgroundJobs、权限或问题等待都不算完成。取消的 job/run 记为 `turn.cancelled`，不是完成。
+- stopped 需核对原因：可恢复 interrupted 保持非终态，明确 user/model/superseded 取消仍不算完成；当前 running 不由旧 journal 的停止记录覆盖。恢复后的活动工作可重新 attach 通知，无需重发任务输入。
 - 过程事件包括 `action.required`、`action.resolved`、`action.pending_stale`、`interaction.unattributed`、`workflow.settled`、`child.failed` 和 `hint.*`。`workflow.settled` 只表示单个 run 结束，默认是收件箱事件，不等于整个任务完成。
 - 事件先写入本机 `notifications.json`，再由投递线程尝试宿主唤醒。事件持久化不等于模型被唤醒；宿主接受 `tools/call` 也只表示消息被接受，不表示模型已读或继续。
 

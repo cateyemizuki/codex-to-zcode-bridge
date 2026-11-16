@@ -9,7 +9,7 @@ const __zcodeNativeModes = Object.freeze({
 });
 
 export function createZcodeDesktopNativeTransport({
-  agent, makeEnvelope, ownershipPath, resolveWorkspace, syncer = () => null,
+  agent, makeEnvelope, ownershipPath, resolveWorkspace, resolveProjectId = null, syncer = () => null,
   fs = __zcodeNativeFs, now = Date.now,
 }) {
   // The host passes a private facade. No generic RPC, engine or connection is returned.
@@ -136,6 +136,42 @@ export function createZcodeDesktopNativeTransport({
     const model = ref(message.model);
     if (!own(message, 'thought_level') || (message.thought_level !== null && typeof message.thought_level !== 'string')) fail('thought_level_required');
     return { model, thought: message.thought_level };
+  }
+  // Fixed project resolution. The host injects one read-only resolver at install
+  // time; this module never guesses a project from names, parent paths or other
+  // sessions, and never creates or rewrites a project. Without an injected
+  // resolver an explicit caller id is passed through unchanged and no project is
+  // inferred, which keeps isolated module use working as before.
+  const projectRejections = Object.freeze({
+    ambiguous: 'project_ambiguous', not_found: 'project_not_found',
+    inactive: 'project_inactive', workspace_mismatch: 'project_workspace_mismatch',
+    invalid: 'project_resolution_invalid',
+  });
+  async function resolveCreationProject(workspace, requestedProjectId) {
+    const explicit = typeof requestedProjectId === 'string' && requestedProjectId ? requestedProjectId : null;
+    if (typeof resolveProjectId !== 'function') {
+      return { projectId: explicit, source: explicit ? 'caller' : 'none' };
+    }
+    let decision;
+    try {
+      decision = await resolveProjectId({ workspacePath: workspace, projectId: explicit });
+    } catch (error) {
+      fail('project_resolution_failed', diagnostic(String(error?.message || error)));
+    }
+    if (!plain(decision) || typeof decision.status !== 'string') fail('project_resolution_invalid');
+    if (own(projectRejections, decision.status)) fail(projectRejections[decision.status]);
+    if (decision.status === 'unique') {
+      const projectId = decision.projectId;
+      if (typeof projectId !== 'string' || !projectId.trim() || projectId.length > 200) fail('project_resolution_invalid');
+      if (explicit && projectId !== explicit) fail('project_resolution_invalid');
+      return { projectId, source: explicit ? 'caller' : 'workspace' };
+    }
+    if (decision.status !== 'none') fail('project_resolution_invalid');
+    if (decision.projectId !== null && decision.projectId !== undefined) fail('project_resolution_invalid');
+    return { projectId: null, source: 'none' };
+  }
+  function projectAssignment(project) {
+    return { status: project.projectId ? 'assigned' : 'unassigned', projectId: project.projectId, source: project.source };
   }
   function availableModels(snapshot) {
     const available = snapshot?.settings?.model?.available;
@@ -343,6 +379,39 @@ export function createZcodeDesktopNativeTransport({
       admissionProtocol: 'session/send', nativeAdmission: { accepted: true, sessionId: result.sessionId,
         ...(Number.isInteger(result.stateRevision) ? { stateRevision: result.stateRevision } : {}) } };
   }
+  async function notifyProjectOnce(workspace, sid, record) {
+    // At most one attempt per owned session. The marker is persisted before the
+    // attempt, so a crash, a failed import or missing facts never become a retry
+    // loop. Create-only sessions never reach here: no durable CLI fact exists yet.
+    if (record.projectNotification) return record.projectNotification;
+    record.projectNotification = { state: 'attempted' }; save();
+    const s = typeof syncer === 'function' ? syncer() : null;
+    if (!s || typeof s.syncSessionFacts !== 'function') {
+      record.projectNotification = { state: 'unavailable' }; save();
+      return record.projectNotification;
+    }
+    try {
+      const imported = await s.syncSessionFacts({ workspacePath: workspace, sessionId: sid });
+      const facts = imported && Array.isArray(imported.facts) ? imported.facts : [];
+      const durable = facts.some((fact) => plain(fact) && fact.sessionId === sid && fact.exists === true);
+      if (!imported || imported.missing === true || !durable) {
+        record.projectNotification = { state: 'facts_unavailable' }; save();
+        return record.projectNotification;
+      }
+      if (imported.changed !== true && typeof s.emitWorkspaceTaskListChanged === 'function') {
+        // The facts import emits its own list event only for a changed row.
+        // Emit the single event here instead so an accepted first turn always
+        // refreshes the list exactly once.
+        s.emitWorkspaceTaskListChanged({ workspacePath: workspace, taskId: sid }, undefined, 'native_project_facts');
+      }
+      record.projectNotification = { state: 'facts_imported', changed: imported.changed === true }; save();
+      return record.projectNotification;
+    } catch (error) {
+      record.projectNotification = { state: 'failed',
+        error: typeof error?.code === 'string' ? error.code : 'sync_failed' }; save();
+      return record.projectNotification;
+    }
+  }
   async function workflowRuns(workspace, sid, limit) {
     return method('conversationWorkflowRunsV4')({ ...targetOf(workspace, sid), limit: Math.min(page(limit, 16), 64) });
   }
@@ -440,12 +509,15 @@ export function createZcodeDesktopNativeTransport({
       if (message.session_id !== undefined || message.firstInput !== undefined || message.text !== undefined) fail('create_accepts_no_input_or_session_id');
       if (message.project_id !== undefined && message.project_id !== null) text(message.project_id, 'project_id');
       const { model, thought } = requestedSelection(message);
+      // Resolve the target project before any catalogue probe or session create.
+      // An ambiguous workspace or an invalid explicit id must not create anything.
+      const project = await resolveCreationProject(workspace, message.project_id);
       const validated = await catalog(workspace, message, request);
       if (thought === null ? validated.thoughtLevels.length > 0 : !validated.thoughtLevels.includes(thought)) fail('thought_level_not_available');
       const selection = { ...model, ...(thought !== null ? { options: { reasoningLevel: thought } } : {}) };
       syncer()?.ensureWorkspaceSubscription?.({ workspacePath: workspace });
       request.phase = 'create_dispatched'; save();
-      const created = await method('createSession')({ workspacePath: workspace, projectId: message.project_id ?? null,
+      const created = await method('createSession')({ workspacePath: workspace, projectId: project.projectId,
         mode: access.mode, model: selection, ...(thought !== null ? { thoughtLevel: thought } : {}),
         persistence: 'immediate', titleGenerationEnabled: false });
       request.sessionId = text(created?.session?.sessionId, 'native_session_id'); request.phase = 'created_unverified'; save();
@@ -456,6 +528,7 @@ export function createZcodeDesktopNativeTransport({
       record.creationMethod = 'legacy-session-create'; record.firstInput = { state: 'not-sent' }; save();
       return { sessionId: record.sessionId, ownedSID: record.sessionId, workspace, model: selected(created),
         thoughtLevel: effortOf(created), mode: modeOf(created), runtime: identity, snapshot: created,
+        projectAssignment: projectAssignment(project),
         desktopIndexFacts: await indexFacts(workspace, record.sessionId), guiVerified: false,
         catalogueProbe: validated.catalogueProbe };
     }
@@ -521,6 +594,7 @@ export function createZcodeDesktopNativeTransport({
       const modelSelection = { ...ref(selected(current)), ...(record.thoughtLevel !== null
         ? { options: { reasoningLevel: record.thoughtLevel } } : {}) };
       let result;
+      let acceptedFirstInput = false;
       if (durableInputObserved(current)) {
         if (record.firstInput) record.firstInput.state = 'durable-observed';
         result = await command(message, workspace, sid, 'sendText', { text: message.text,
@@ -528,9 +602,19 @@ export function createZcodeDesktopNativeTransport({
       } else {
         if (record.firstInput?.state === 'accepted') fail('first_input_not_yet_observed');
         result = await sendInitialInput(workspace, sid, current, modelSelection, message, record, request);
+        acceptedFirstInput = true;
       }
       record.mode = access.mode; save();
-      return { ...result, sessionId: sid, model: selected(current), thoughtLevel: effortOf(current), mode: access.mode };
+      // One list refresh at most, only after the first input was accepted and the
+      // session therefore has durable CLI facts. Notification problems are
+      // diagnostics, never a reason to turn an accepted send into a failure.
+      let listNotification;
+      if (acceptedFirstInput && !record.projectNotification) {
+        try { listNotification = await notifyProjectOnce(workspace, sid, record); }
+        catch { listNotification = { state: 'failed', error: 'notification_unavailable' }; }
+      }
+      return { ...result, sessionId: sid, model: selected(current), thoughtLevel: effortOf(current), mode: access.mode,
+        ...(listNotification ? { listNotification } : {}) };
     }
     if (op === 'native_resolve') {
       const interactionId = text(message.interaction_id, 'interaction_id');

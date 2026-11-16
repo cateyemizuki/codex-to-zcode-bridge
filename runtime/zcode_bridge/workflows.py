@@ -13,10 +13,18 @@ def actor_session_id(run_id, actor):
 def topology(run_id, events):
     actors, nodes, phases = {}, {}, []
     status = 'unknown'
+    stop_reason, resumable = None, None
     for event in events:
         kind, payload = event.get('type'), event.get('payload', {})
+        # A resumed run keeps its ID and journal.  These are the real native
+        # lifecycle events; old run-settled entries must not survive a new start.
+        if kind in ('run-started', 'run-launched'):
+            status = 'running'
+            stop_reason, resumable = None, None
         if kind == 'run-settled':
             status = payload.get('status', status)
+            stop_reason = payload.get('stopReason')
+            resumable = payload.get('resumable')
         if kind == 'phase-entered':
             phases.append({'name':payload.get('name'),'ordinal':payload.get('ordinal')})
         actor = payload.get('actor')
@@ -35,4 +43,11 @@ def topology(run_id, events):
                 if source in payload:
                     node[target] = payload[source]
             node['status'] = kind.removeprefix('node-')
-    return {'run_id':run_id,'status':status,'phases':phases,'actors':list(actors.values()),'nodes':list(nodes.values())}
+    result = {'run_id':run_id,'status':status,'phases':phases,
+              'actors':list(actors.values()),'nodes':list(nodes.values())}
+    if status == 'stopped':
+        if isinstance(stop_reason, str) and stop_reason:
+            result['stop_reason'] = stop_reason
+        if type(resumable) is bool:
+            result['resumable'] = resumable
+    return result

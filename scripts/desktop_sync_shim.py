@@ -68,11 +68,46 @@ ENGINE_REPLACEMENT = (
 )
 
 ANCHOR_EXPOSE = "let Xi=fpe({agentService:Et,taskIndexRepo:T}),"
+# The project resolver is a fixed, read-only factory input. It is placed after
+# ``...O`` so the control plane can never override it, it reads projects through
+# the host's own repository and never creates or rewrites anything, and it does
+# not add a global, eval or generic channel. ``T`` is the unshadowed
+# TaskIndexRepo at this module-level anchor (inside fpe it would be shadowed).
 REPLACEMENT_EXPOSE = (
     "let Xi=fpe({agentService:Et,taskIndexRepo:T}),"
     "__zcodeSyncBind=(globalThis.__zcodeDesktopSync=Xi),"
     "__zcodeNativeBind=(globalThis.__zcodeDesktopNativeCreate=O=>createZcodeDesktopNativeTransport({"
-    "...O,makeEnvelope:ti,syncer:()=>Xi,agent:Object.freeze(Object.fromEntries(["
+    "...O,"
+    "resolveProjectId:async S=>{"
+    "let w=typeof S?.workspacePath===\"string\"?S.workspacePath:\"\";"
+    "let e=typeof S?.projectId===\"string\"&&S.projectId?S.projectId:null;"
+    "if(!w)return{status:\"invalid\",projectId:null};"
+    "let sep=String.fromCharCode(92);"
+    "let norm=v=>{let s=typeof v===\"string\"?v:\"\";"
+    "while(s.length>1&&(s.slice(-1)===\"/\"||s.slice(-1)===sep))s=s.slice(0,-1);"
+    "s=s.split(sep).join(\"/\");"
+    "return process.platform===\"win32\"?s.toLowerCase():s};"
+    "let target=norm(w);"
+    "let repo=await T.getProjectRepository();"
+    "let projects=repo.readTree({includeTasks:!1}).projects;"
+    "projects=Array.isArray(projects)?projects:[];"
+    "let active=p=>!!p&&p.hostId===\"local\"&&p.deleted!==!0&&Array.isArray(p.roots)"
+    "&&p.roots.some(r=>!!r&&norm(r.rootPath)===target);"
+    "if(e){"
+    "let hit=projects.find(p=>!!p&&p.id===e);"
+    "if(!hit)return{status:\"not_found\",projectId:null};"
+    "if(hit.hostId!==\"local\")return{status:\"invalid\",projectId:null};"
+    "if(hit.deleted===!0)return{status:\"inactive\",projectId:null};"
+    "if(!Array.isArray(hit.roots)||!hit.roots.some(r=>!!r&&norm(r.rootPath)===target))"
+    "return{status:\"workspace_mismatch\",projectId:null};"
+    "return{status:\"unique\",projectId:String(hit.id)};"
+    "}"
+    "let hits=projects.filter(active);"
+    "if(hits.length===0)return{status:\"none\",projectId:null};"
+    "if(hits.length>1)return{status:\"ambiguous\",projectId:null,count:hits.length};"
+    "return{status:\"unique\",projectId:String(hits[0].id)};"
+    "},"
+    "makeEnvelope:ti,syncer:()=>Xi,agent:Object.freeze(Object.fromEntries(["
     '"createSession","closeSession","getWorkspaceRuntimeIdentity","getSessionLifecycle","readSession",'
     '"readSessionMessages","readSessionEvents","listSessionSubagents","listSessions","setModel",'
     '"setThoughtLevel","setMode","sendPrompt","sendConversationCommandV4",'

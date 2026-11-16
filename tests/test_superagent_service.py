@@ -2132,7 +2132,8 @@ class SuperagentServiceTests(unittest.TestCase):
         self.assertEqual(native.child_message_calls[0]['child_session_id'], actor_id)
 
     def test_stopped_runs_are_cancelled_terminal_not_completed(self):
-        self.fake.runs = [{'runId': 'run-stopped', 'status': 'stopped'}]
+        self.fake.runs = [{'runId': 'run-stopped', 'status': 'stopped',
+                           'stopReason': 'user', 'resumable': True}]
         rows, truncated = self.bridge._run_rows('sess_agent_1', strict=True)
         self.assertFalse(truncated)
         self.assertEqual(rows[0]['status'], 'stopped')

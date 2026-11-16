@@ -3,6 +3,7 @@
 - 当前包用于桥接管理。安装先运行 `python install.py --dry-run`，再执行实际安装；参数来自本机发现和用户设置。
 - 普通编码使用当前 ZCode 会话的原生工具，不要通过桥接递归创建自己来完成当前任务。
 - 独立子代理模型/强度通常使用原生动态工作流，并加载 ZCode 自己的工作流 skill。
+- 需运行中接收新事实时预留 hole/escalation；普通主会话跟进不能直接改写已派发 DWF actor 上下文。可恢复 interrupted 与明确用户取消分别处理，不把旧 run 的报告冒充修订后交付。
 - 仅在用户明确要求管理另一个会话时调用对应 `zcode_*` 工具。使用真实会话 ID，保留其他会话、进程和配置。高层 `zcode_delegate`/`zcode_agent_message`/`zcode_agent_inspect`/`zcode_agent_answer`/`zcode_agent_cancel` 也可用；单题回答优先 `answer="实际选项 label/value"`，报告用 `zcode_agent_report(agent_id, result)`。`reported` 只是自述，`verified` 才是终态，`stalled`/`unobservable` 不是完成；`verified` 仅覆盖 `turn_lifecycle`，业务成功仍需复核结构化结果。
 - 每次变更使用发起方当前实际权限；真实问题和首次工作流授权不能伪造。
 - 主动提示用 `zcode_notify_emit`：`kind` 只能是 `progress`、`action_required` 或 `needs_verification`，`hint_id` 为 1–64 字符，并传当前真实 `caller_permission_mode`。它只写提示并触发一次验证轮询，**绝不声明完成**。给出 `subscription_id` 时只发该订阅；未给出时发给该 session 的所有活动订阅，不要猜测“最近活动”的订阅。

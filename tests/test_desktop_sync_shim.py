@@ -3,6 +3,7 @@ import importlib.util
 import json
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -147,6 +148,82 @@ class DesktopSyncShimTests(unittest.TestCase):
         self.assertIn("op === 'sync'", source)
         self.assertIn("resolveAllowed", source)
         self.assertNotIn("::1", source)
+
+    def test_expose_hook_is_a_fixed_read_only_project_resolver(self):
+        expose = shim.REPLACEMENT_EXPOSE
+        # A fixed factory argument placed after the caller spread: the private
+        # control plane cannot override or drop it, and no global channel exists.
+        self.assertIn("...O,resolveProjectId:async S=>{", expose)
+        self.assertNotIn("globalThis.resolve", expose)
+        self.assertIn("await T.getProjectRepository()", expose)
+        self.assertIn("readTree({includeTasks:!1}).projects", expose)
+        for token in ("eval(", "new Function", "child_process", "app.asar"):
+            self.assertNotIn(token, expose)
+        # Only these fixed decisions cross the boundary.
+        for status in ("unique", "none", "ambiguous", "not_found", "inactive", "workspace_mismatch", "invalid"):
+            self.assertIn(f'status:"{status}"', expose)
+        # Read-only: no project create/rename/move and no raw SQL.
+        for token in ("saveProject", "initializeProjectRoot", "reserveCreatedTask", "moveTask", "INSERT ", "UPDATE "):
+            self.assertNotIn(token, expose)
+
+    def test_project_resolver_stays_out_of_the_fpe_api_scope(self):
+        # Inside fpe the local T is the unsubscribeIndex helper; the resolver must
+        # stay at the module-level expose anchor where T is the task index repo.
+        self.assertNotIn("resolveProjectId", shim.REPLACEMENT_API)
+        self.assertIn("resolveProjectId", shim.REPLACEMENT_EXPOSE)
+
+    def test_plan_inlines_the_fixed_project_resolver_once(self):
+        plan = shim.make_plan(self.app, shim.load_manifest(self.manifest))
+        text = plan.patched.decode("utf-8")
+        self.assertEqual(text.count("resolveProjectId:async S=>{"), 1)
+        self.assertIn("...O,resolveProjectId:async S=>{", text)
+        self.assertIn("await T.getProjectRepository()", text)
+        self.assertIn("ZCODE_DESKTOP_NATIVE_TRANSPORT_V1", text)
+
+    def test_injected_resolver_matches_only_one_active_local_project(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "Node is required to execute the injected resolver text")
+        expose = shim.REPLACEMENT_EXPOSE
+        start = expose.index("resolveProjectId:") + len("resolveProjectId:")
+        resolver = expose[start:expose.index(",makeEnvelope:ti")]
+        projects = [
+            {"id": "prj_one", "hostId": "local", "deleted": False, "roots": [{"rootPath": "/projects/ws/", "isPrimary": True}]},
+            {"id": "prj_other", "hostId": "local", "deleted": False, "roots": [{"rootPath": "/projects/other"}]},
+            {"id": "prj_remote", "hostId": "remote-1", "deleted": False, "roots": [{"rootPath": "/projects/ws"}]},
+            {"id": "prj_deleted", "hostId": "local", "deleted": True, "roots": [{"rootPath": "/projects/ws"}]},
+            {"id": "prj_twin_a", "hostId": "local", "deleted": False, "roots": [{"rootPath": "/projects/twin"}]},
+            {"id": "prj_twin_b", "hostId": "local", "deleted": False, "roots": [{"rootPath": "/projects/twin"}]},
+        ]
+        cases = [
+            {"workspacePath": "\\projects\\ws", "projectId": None},
+            {"workspacePath": "/projects/nothing", "projectId": None},
+            {"workspacePath": "/projects/twin", "projectId": None},
+            {"workspacePath": "/projects/ws", "projectId": "prj_one"},
+            {"workspacePath": "/projects/ws", "projectId": "prj_missing"},
+            {"workspacePath": "/projects/ws", "projectId": "prj_deleted"},
+            {"workspacePath": "/projects/ws", "projectId": "prj_other"},
+        ]
+        script = (
+            "const projects=" + json.dumps(projects) + ";"
+            "const T={async getProjectRepository(){return{readTree(input){"
+            "if(input.includeTasks!==false)throw new Error('tasks must not be read');"
+            "return{projects};}};}};"
+            "const resolveProjectId=" + resolver + ";"
+            "const cases=" + json.dumps(cases) + ";"
+            "const out=[];for(const item of cases)out.push(await resolveProjectId(item));"
+            "console.log(JSON.stringify(out));"
+        )
+        completed = subprocess.run([node, "--input-type=module", "-e", script],
+                                   capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        out = json.loads(completed.stdout)
+        self.assertEqual(out[0], {"status": "unique", "projectId": "prj_one"})
+        self.assertEqual(out[1], {"status": "none", "projectId": None})
+        self.assertEqual(out[2], {"status": "ambiguous", "projectId": None, "count": 2})
+        self.assertEqual(out[3], {"status": "unique", "projectId": "prj_one"})
+        self.assertEqual(out[4], {"status": "not_found", "projectId": None})
+        self.assertEqual(out[5], {"status": "inactive", "projectId": None})
+        self.assertEqual(out[6], {"status": "workspace_mismatch", "projectId": None})
 
     def test_sync_cli_sends_canonical_workspace(self):
         workspace = self.root / "workspace"

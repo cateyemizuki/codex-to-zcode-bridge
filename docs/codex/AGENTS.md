@@ -6,6 +6,7 @@
 - 旧 28 个工具仍可用；新工具需要真实 source thread，缺少时拒绝而不是猜最近会话。会话后端默认独立引擎；只有显式 `transport=desktop_native` 才使用 Desktop-owned 原生会话，绑定后不按全局设置重判，不支持项明确报错、不静默回退。
 - `attach_report_mcp=true` 只在 engine 创建时附加一个只暴露 `zcode_agent_report` 的 session-local MCP 入口；native host 没有该参数，明确 unsupported。不要用工作区 `.mcp.json` 或全局 registry 冒充已加载。
 - 先读取真实模型。未知默认模型时让用户选择；每次变更按当前会话的真实权限传入。
+- 原生新会话读取返回的项目归属；未归属项可能在折叠的“任务”组，不用 reload 或抢焦点来推断缺失。可恢复 interrupted 保持非终态，恢复或修订后重新 attach 活动工作，不重发原输入。
 - 需要独立子代理模型/强度时通常使用原生动态工作流。自然语言说明阶段、依赖、模型、强度和验收，不复制完整 ZCode skill。
 - 保留 session ID，读取真实问题和授权。accepted、首次 idle、waiting、error、paused 和仍有后台工作都不是完成；完成只认持久通知事件中的终态证据。
 - 何时订阅：只在用户明确要求完成通知或自动续工的这个 chat 中订阅。派发时用 `zcode_send` 的 `notify={completion_notify,auto_continue,user_authorized:true}` 加 `idempotency_key`；对已经在运行的轮次或活动后台工作用 `zcode_notify_subscribe`。`user_authorized` 必须来自当前 chat 的明确授权，不能从旧会话、旧订阅或模型自己的推断补齐。

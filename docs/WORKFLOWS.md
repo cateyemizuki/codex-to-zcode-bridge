@@ -2,7 +2,7 @@
 
 GPT 侧通过自然语言指定目标即可，完整 skill 由 ZCode 自己加载。
 
-0.5.1 推荐先走高层入口：`zcode_delegate` 一次创建/派发并可选订阅，后续用 `zcode_agent_message` 纠偏、`zcode_agent_inspect` 查看状态与 pending、`zcode_agent_answer` 回答真实请求、`zcode_agent_cancel` 只取消该 job。旧工具仍可用于需要精确控制 session 的场景。
+0.5.2 推荐先走高层入口：`zcode_delegate` 一次创建/派发并可选订阅，后续用 `zcode_agent_message` 纠偏、`zcode_agent_inspect` 查看状态与 pending、`zcode_agent_answer` 回答真实请求、`zcode_agent_cancel` 只取消该 job。旧工具仍可用于需要精确控制 session 的场景。
 
 1. 调用 `zcode_models` 取得实际 provider/model ID 和支持的强度。
 2. 在指定的已有绝对工作区创建 `workflow_mode=onDemand` 会话。

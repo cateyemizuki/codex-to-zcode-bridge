@@ -31,6 +31,10 @@ agent 协助：将根 README 的安装提示词交给拥有本机文件和命令
 
 完成通知的轮询间隔、轮次启动等待、订阅过期和唤醒尝试次数在原生设置或内嵌面板中调整，默认分别为 1 秒、120 秒、6 小时和 5 次。它们只影响观察和投递，不授予唤醒或自动续工权限；自动续工必须在单个订阅上显式授权。
 
+Codex 的 MCP 启动环境需要显式转发宿主连接信息。Codex 侧原始包与安装器输出均在 `env_vars` 中列出 `CODEX_APP_TOOLS_PIPE_PATH`、`CODEX_APP_RUNTIME_CLI_PATH` 和 `CODEX_MCP_NODE_PATH`，只保存名称，不保存当前值；ZCode 侧不转发这些 Codex 专用能力。此配置遵循 [Codex 的环境变量转发规则](https://learn.chatgpt.com/docs/extend/mcp)。如果当前聊天能访问宿主工具，而桥接探针立即返回 `pipe_unavailable`，先检查这三个名称是否保留，并重载 MCP 插件使新进程收到环境。不要把本机连接值复制进仓库或命令提示词。
+
+安装器将本次实际使用的状态目录写入本机 MCP 配置的 `env.ZCODE_BRIDGE_STATE`，避免客户端过滤环境后切换到另一份配置。升级时保留该目录；更新两侧且原先指向不同状态目录时，需要显式选择 `ZCODE_BRIDGE_STATE`，不会自动合并两份会话或配置。
+
 ## 高层子代理与 Desktop 同步配置
 
 高层 `zcode_delegate`/`zcode_agent_message`/`zcode_agent_inspect`/`zcode_agent_answer`/`zcode_agent_cancel`/`zcode_agent_report` 使用本机 `superagent.json` 保存 job、队列、cursor、事件和连续读取失败计数；不要手工编辑该文件。旧 28 个工具仍兼容。
@@ -45,6 +49,8 @@ agent 协助：将根 README 的安装提示词交给拥有本机文件和命令
 - `desktop_sync_min_interval_seconds`：默认 5，范围 1–300；按 workspace 合并/节流。
 
 Desktop 同步的可选补丁工具不在默认插件包里，也不随安装器自动执行：`scripts/desktop_sync_copy.py`、`scripts/desktop_sync_shim.py`、`scripts/desktop_sync_probe.py` 和 `runtime/desktop_sync/` 只从仓库取得。需要时按 [DESKTOP_SYNC_SHIM.md](DESKTOP_SYNC_SHIM.md) 的版本/SHA-256 门禁复制隔离副本、生成私有 control 文件并显式启动；补丁工具保持可选，额外准备步骤和回滚步骤见该文档。探针默认只读，sync 需要 `--confirm-sync`，不打开项目、不抢焦点、不打印 token。
+
+要作用于原版安装目录本身而不是复制件时，使用独立的显式入口 `python scripts/desktop_native_install.py`：安装、回滚、自动更新失效检查与尚未验证项见 [DESKTOP_NATIVE_INSTALL.md](DESKTOP_NATIVE_INSTALL.md)。
 
 真实最小往返入口：`python scripts/superagent_live_check.py --workspace <existing-workspace>` 只 preflight 与列模型；加 `--source-thread <thread>` 和 `--confirm-live` 才会执行 delegate → inspect → message → inspect → cancel。
 
@@ -76,7 +82,7 @@ ZCode 侧使用自己的市场命令。其宿主支持插件根目录变量，�
 
 ## 升级与移除
 
-从新版仓库或 ZIP 重新执行安装器。相同安装位置会先备份原插件再更新；已有配置与 provider 凭据保留。当前发布版本为 0.5.1；状态返回的 `bridge_version` 可用于确认实际运行版本，这不需要重启 ZCode 桌面。两侧使用同一个控制服务，升级不要强制结束正在运行的会话。已运行的旧控制服务可能仍使用旧代码；先等该服务管理的任务结束，再重新载入桥接服务。
+从新版仓库或 ZIP 重新执行安装器。相同安装位置会先备份原插件再更新；已有配置与 provider 凭据保留。当前发布版本为 0.5.2；状态返回的 `bridge_version` 可用于确认实际运行版本，这不需要重启 ZCode 桌面。两侧使用同一个控制服务，升级不要强制结束正在运行的会话。已运行的旧控制服务可能仍使用旧代码；先等该服务管理的任务结束，再重新载入桥接服务。MCP 环境转发配置也要由新进程加载，单次临时宿主上下文恢复不能代替重载后的验收。
 
 升级到带完成通知的版本时，旧服务进程不会自动获得新的观察器和投递线程。重新载入桥接服务后：持久事件和订阅仍在，待送队列保留，宿主能力缓存清空；已确认或已投递的唤醒不会重放。新订阅会记录当前 chat 的授权；不要从旧版本或旧会话推断自动续工授权。若宿主管道在重启后变化，先重新探测，仍失败时在来源 chat 重新订阅。真实端到端唤醒仍需在真实 Codex Desktop chat 上验收。
 
@@ -93,7 +99,7 @@ ZCode 侧使用自己的市场命令。其宿主支持插件根目录变量，�
 | 消息分页/锚点为 null | 0.3.1 起兼容 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；没有任何 ID 时保留调用方 anchor，不伪造 ID |
 | ZCode 获得焦点 | 只有明确的工作区打开才应发生，不用该操作刷新列表 |
 | 首次动态工作流仍要求授权 | 正常读取并处理真实请求，完全访问不能伪造该步骤 |
-| 收件箱有事件但没有自动回到 chat | 收件箱是拉取路径；先看 `zcode_notify_status` 的宿主能力。`unsupported`/`pipe_unavailable` 时事件保留，重新探测或重新订阅，不要把拉取说成已唤醒 |
+| 收件箱有事件但没有自动回到 chat | 收件箱是拉取路径；先看 `zcode_notify_status` 的宿主能力。立即 `pipe_unavailable` 时检查 Codex 侧 `env_vars` 的三个宿主变量并重载 MCP；事件保留，不要把拉取说成已唤醒 |
 | 宿主唤醒失败、超时或握手失败 | 事件保留在待送队列并按退避重试；检查本机 Codex Desktop 是否提供第一方 MCP 的 `send_message_to_thread`，跨版本不保证 |
 | 订阅显示 `send_uncertain` | 发送可能已经执行；不要自动重发，只有用户明确要求时才用 `retry=true`，可能产生重复 |
 | 重启后没有继续收到新事件 | 重新探测并检查订阅是否过期；在来源 chat 重新 `zcode_notify_subscribe` 或重新派发 |

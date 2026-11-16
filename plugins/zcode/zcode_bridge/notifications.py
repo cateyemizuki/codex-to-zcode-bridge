@@ -154,14 +154,25 @@ def _job_state(item):
 
 def _run_state(item):
     status = str(item.get('status') or item.get('state') or '').lower()
+    if status in ('failed', 'error', 'errored'):
+        return 'failed'
+    if status in ('cancelled', 'canceled'):
+        return 'cancelled'
+    if status == 'stopped':
+        reason = item.get('stop_reason') or item.get('stopReason')
+        # Native 3.18.2 also calls deliberate user/model stops resumable.  The
+        # flag alone cannot distinguish a recoverable interruption from cancel.
+        if reason in ('user', 'model', 'superseded'):
+            return 'cancelled'
+        if reason == 'interrupted' and item.get('resumable') is True:
+            return 'paused'
+        return 'unknown'
+    if status in ('paused', 'interrupted'):
+        return 'paused'
     if item.get('settled') is False:
         return 'running'
     if status in ('completed', 'complete', 'succeeded', 'success', 'settled'):
         return 'completed'
-    if status in ('failed', 'error'):
-        return 'failed'
-    if status in ('cancelled', 'canceled', 'stopped'):
-        return 'cancelled'
     if status in ('queued', 'scheduled', 'pending', 'running', 'waiting', 'active'):
         return status
     if item.get('settled') is True:

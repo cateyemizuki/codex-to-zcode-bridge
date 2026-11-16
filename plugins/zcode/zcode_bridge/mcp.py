@@ -19,6 +19,8 @@ SOURCE_REQUIRED = {'zcode_notify_subscribe', 'zcode_notify_cancel', 'zcode_notif
 # zcode_agent_report is intentionally not source-required: an unprovable child
 # report is recorded as an unverified hint instead of being rejected.
 INSTRUCTIONS = '''Control local ZCode through the zcode_* tools; no skill is required.
+Native project assignment is returned as project_assignment/projectAssignment. Unassigned sessions may be in a collapsed or scrolled Tasks group: inspect grouping before claiming they are missing; never force-expand, reload or steal focus.
+Recoverable interrupted workflows remain nonterminal; inspect stop reason and current runtime, not an old journal terminal. Reattach notifications after a real resume/revision without resending the original input. Ordinary main-session follow-ups do not directly inject context into running DWF actors; use planned holes/escalation or one justified revision.
 zcode_open_settings opens the embedded configuration panel. Native plugin preferences use openai/settings.
 Read zcode_models for exact provider/model IDs and supported reasoning levels. Never substitute models.
 Create a session in the specified existing absolute workspace, retain its exact session ID, send content and observe until complete.

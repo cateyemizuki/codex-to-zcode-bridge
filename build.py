@@ -6,9 +6,10 @@ import shutil
 import tempfile
 import zipfile
 from pathlib import Path
+from scripts.installer import mcp_server_config
 
 ROOT = Path(__file__).resolve().parent
-VERSION = '0.5.1'
+VERSION = '0.5.2'
 MARKET = 'codex-to-zcode-bridge-plugins'
 REPOSITORY = 'https://github.com/cateyemizuki/codex-to-zcode-bridge'
 
@@ -50,7 +51,7 @@ def build(destination):
             'p=Path(sys.argv[1])/"bridge.py";sys.path.insert(0,str(p.parent));'
             'sys.argv=[str(p),*sys.argv[2:]];runpy.run_path(str(p),run_name="__main__")')
         arguments = ['-m','zcode_bridge','mcp'] if host=='codex' else ['-c',bootstrap,'${CLAUDE_PLUGIN_ROOT}','mcp']
-        write(target/'.mcp.json', {'mcpServers':{'zcode_bridge':{'command':'python','args':arguments}}})
+        write(target/'.mcp.json', {'mcpServers':{'zcode_bridge':mcp_server_config(host, 'python', arguments)}})
         # ZCode resolves its plugin-root variable. The current Codex MCP loader
         # does not, so direct marketplace installs first install this Python
         # distribution; the normal installer pins a local script for either host.

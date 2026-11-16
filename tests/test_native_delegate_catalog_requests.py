@@ -82,6 +82,8 @@ class NativeDelegateCatalogRequestTests(unittest.TestCase):
                 'sessionId': sid, 'ownedSID': sid, 'workspace': self.workspace,
                 'snapshot': copy.deepcopy(snapshot), 'model': dict(self.MODEL),
                 'thoughtLevel': 'high', 'mode': 'yolo',
+                'projectAssignment': {'status':'assigned', 'projectId':'project_fixture', 'source':'workspace'},
+                'desktopIndexFacts': {'sessions':[{'sessionId':sid, 'exists':False}]},
                 'runtime': {'identity': 'test-runtime', 'generation': 1}}}
         if op == 'native_send':
             if self.send_unknown:
@@ -111,6 +113,17 @@ class NativeDelegateCatalogRequestTests(unittest.TestCase):
     def messages(self, op):
         return [call.args[1] for call in self.channel.call_args_list
                 if call.args[1]['op'] == op]
+
+    def test_native_project_assignment_reaches_parent_and_later_reads(self):
+        result = self.delegate('project-context')
+        self.assertEqual(result['project_assignment'], {
+            'status':'assigned', 'projectId':'project_fixture', 'source':'workspace'})
+        sid = result['session_id']
+        snapshot = self.bridge.summary(self.snapshots[sid])
+        self.assertEqual(snapshot['desktop']['connection'], 'desktop_native')
+        self.assertEqual(snapshot['projectAssignment'], result['project_assignment'])
+        result['project_assignment']['projectId'] = 'changed_by_caller'
+        self.assertEqual(self.bridge.sessions[sid]['project_assignment']['projectId'], 'project_fixture')
 
     def test_host_catalog_replay_has_request_metadata_without_available(self):
         native = self.bridge.desktop_native

@@ -19,7 +19,8 @@ from .workflows import topology
 from .identity import (is_visible_message, message_activity_digest,
                        message_identity)
 from .notifications import (NotificationStore, Observer, has_anchor_proof,
-                            make_input_id, subscription_anchor, TERMINAL_STATES)
+                            make_input_id, subscription_anchor, TERMINAL_STATES,
+                            _run_state as workflow_run_state)
 from .delivery import DeliveryWorker
 from .host_wake import HostWakeAdapter
 from .desktop_sync import DesktopSyncAdapter
@@ -836,6 +837,21 @@ class Bridge:
         if sid:
             workspace = (result.get('session') or {}).get('workspace', {}).get('workspacePath') or self.sessions.get(sid, {}).get('workspace')
             result['desktop'] = session_visibility(sid, workspace)
+            if result.get('transport') == 'desktop_native':
+                # The persisted index is still useful, but the legacy helper's
+                # independent-engine diagnosis is false for a Desktop-owned SID.
+                result['desktop']['connection'] = 'desktop_native'
+                result['desktop'].pop('live_updates', None)
+                result['desktop']['gui_verified'] = False
+                result['desktop']['note'] = (
+                    '由 ZCode Desktop 原生引擎管理；持久索引与当前页面是否可见需分别核实。')
+                for key in ('ownedSID', 'desktopIndexFacts', 'desktopListEvent', 'projectAssignment'):
+                    if key in snapshot:
+                        result[key] = copy.deepcopy(snapshot[key])
+                if 'projectAssignment' not in result and isinstance(info.get('project_assignment'), dict):
+                    result['projectAssignment'] = copy.deepcopy(info['project_assignment'])
+                # The control channel never inspects the actual GUI.
+                result['guiVerified'] = False
         return result
 
     # ------------------------------------------------------- notification helpers
@@ -992,30 +1008,112 @@ class Bridge:
             children.append(row)
         return children, child_ids
 
+    def _workflow_stop_metadata(self, sid, run_ids, deadline=None):
+        """Read missing stop reasons from this engine and this bound workspace.
+
+        The native transport has no workspace-runs endpoint.  It must never
+        fall back to an independent engine; its own journal is the only fallback.
+        No script/args/result fields or other parents' run records are retained.
+        """
+        info = self._session_info(sid)
+        workspace = info.get('workspace')
+        if self._is_native(sid) or not isinstance(workspace, str) or not workspace \
+                or not Path(workspace).is_absolute():
+            return {}, 'workflow_stop_metadata_unavailable'
+        try:
+            response = self.rpc('workflows/runs', {
+                'workspace': {'workspacePath': workspace, 'workspaceKey': workspace},
+                'scope': 'project', 'limit': 50}, deadline)
+            candidates = (response or {}).get('runs')
+            if not isinstance(candidates, list):
+                return {}, 'workflow_stop_metadata_invalid'
+            matches, duplicates = {}, set()
+            for row in candidates:
+                if not isinstance(row, dict):
+                    continue
+                run_id = row.get('runId')
+                if run_id not in run_ids or row.get('parentSessionId') != sid:
+                    continue
+                if row.get('cwd') is not None and row['cwd'] != workspace:
+                    continue
+                if run_id in matches:
+                    duplicates.add(run_id)
+                    continue
+                matches[run_id] = {
+                    'status': str(row.get('status') or '').lower(),
+                    'stop_reason': (row.get('stopReason')
+                                    if isinstance(row.get('stopReason'), str) else None),
+                }
+            for run_id in duplicates:
+                matches.pop(run_id, None)
+            return matches, 'workflow_stop_metadata_ambiguous' if duplicates else ''
+        except Exception as error:
+            return {}, 'workflow_stop_metadata_' + type(error).__name__
+
     def _run_rows(self, sid, deadline=None, strict=False):
         rows, calls = [], 0
         raw_runs = self._workflow_runs(sid, deadline, strict=strict)
+        missing_reasons = {str(run.get('runId') or run.get('run_id') or '')
+                           for run in raw_runs[:64]
+                           if str(run.get('status') or run.get('state') or '').lower() == 'stopped'
+                           and not (run.get('stopReason') or run.get('stop_reason'))}
+        missing_reasons.discard('')
+        metadata, metadata_error = (self._workflow_stop_metadata(sid, missing_reasons, deadline)
+                                    if missing_reasons else ({}, ''))
         for run in raw_runs[:64]:
             run_id = str(run.get('runId') or run.get('run_id') or '')
             if not run_id:
                 continue
             status = str(run.get('status') or run.get('state') or '').lower()
-            settled = status in ('completed', 'complete', 'succeeded', 'success', 'settled',
-                                 'failed', 'error', 'cancelled', 'canceled', 'stopped')
+            facts = {'status': status}
+            reason = run.get('stopReason') or run.get('stop_reason')
+            if isinstance(reason, str) and reason:
+                facts['stop_reason'] = reason
+            if type(run.get('resumable')) is bool:
+                facts['resumable'] = run['resumable']
+            reason_source = 'sdk' if facts.get('stop_reason') else ''
+            supplement = metadata.get(run_id)
+            conflict = bool(supplement and supplement['status'] != status)
+            if supplement and not conflict and supplement.get('stop_reason'):
+                facts['stop_reason'] = supplement['stop_reason']
+                reason_source = 'workspace_runs'
             cursor = 0
             read_error = ''
-            if not settled and calls < 5:
+            state = workflow_run_state(facts)
+            if (state not in ('completed', 'failed', 'cancelled')) and calls < 5:
                 calls += 1
                 topo = self.observe_run_topology(sid, run_id, deadline)
                 cursor = int(topo.get('after_sequence') or 0)
                 read_error = str(topo.get('read_error') or '')
-                if topo.get('status') not in (None, '', 'unknown'):
-                    status = str(topo['status']).lower()
-                    settled = status in ('completed', 'complete', 'succeeded', 'success',
-                                         'settled', 'failed', 'error', 'cancelled', 'canceled',
-                                         'stopped')
-            row = {'run_id': run_id, 'status': status or 'unknown', 'settled': settled,
+                # SDK listRunsForSession merges current live runtime state with
+                # its journal.  Historical topology must not undo that merge.
+                if (status == 'stopped' and not conflict and topo.get('status') == 'stopped'
+                        and not topo.get('more') and not read_error):
+                    if not facts.get('stop_reason') and topo.get('stop_reason'):
+                        facts['stop_reason'] = topo['stop_reason']
+                        reason_source = 'journal'
+                    if 'resumable' not in facts and type(topo.get('resumable')) is bool:
+                        facts['resumable'] = topo['resumable']
+                elif status == 'stopped' and topo.get('more') and cursor:
+                    read_error = read_error or 'workflow_stop_journal_truncated'
+            state = 'unknown' if conflict else workflow_run_state(facts)
+            # Normalize only the observation's lifecycle label.  Preserve the
+            # native SDK status and diagnostic facts rather than inventing them.
+            normalized = ('failed' if status == 'errored' else
+                          state if state in ('paused', 'unknown') else status)
+            row = {'run_id': run_id, 'status': normalized or 'unknown',
+                   'settled': state in ('completed', 'failed', 'cancelled'),
                    'cursor': cursor}
+            row.update({key: facts[key] for key in ('stop_reason', 'resumable') if key in facts})
+            if normalized != status:
+                row['native_status'] = status
+            if reason_source:
+                row['stop_reason_source'] = reason_source
+            if conflict:
+                row['metadata_status'] = supplement['status']
+                read_error = 'workflow_status_conflict'
+            elif status == 'stopped' and state == 'unknown':
+                read_error = read_error or metadata_error or 'workflow_stop_unverified'
             if read_error:
                 row['read_error'] = read_error
             rows.append(row)
@@ -1563,6 +1661,8 @@ class Bridge:
                 'native_runtime': copy.deepcopy(created.get('runtime') or {}),
                 'native_source': str(created.get('source') or 'desktop-native-host'),
             }
+            if isinstance(created.get('projectAssignment'), dict):
+                self.sessions[sid]['project_assignment'] = copy.deepcopy(created['projectAssignment'])
         # Only the successful native_create result contains this confirmed SID;
         # unknown/replayed requests are not creation proof and fail above.
         self._mark_created(sid)
@@ -1584,6 +1684,9 @@ class Bridge:
             'desktopIndexFacts': copy.deepcopy(created.get('desktopIndexFacts')),
             'guiVerified': bool(created.get('guiVerified')),
         }
+        for key in ('projectAssignment', 'desktopListEvent'):
+            if key in created:
+                result[key] = copy.deepcopy(created[key])
         return self.summary(result)
 
     def call(self, name, args=None, context=None, budget_ms=None, meta=None):
@@ -2083,6 +2186,11 @@ class Bridge:
             delivery = 'pending'
         else:
             delivery = 'not_armed'
+        with self.lock:
+            session_info = self.sessions.get(job.get('session_id'))
+            assignment = (copy.deepcopy(session_info.get('project_assignment'))
+                          if isinstance(session_info, dict)
+                          and session_info.get('transport') == 'desktop_native' else None)
         return {
             'created': bool(created),
             'conflict': bool(conflict),
@@ -2095,6 +2203,7 @@ class Bridge:
             'thought_level': job.get('thought_level'),
             'effective_thought_level': job.get('effective_thought_level'),
             'workflow_mode': job.get('workflow_mode'),
+            **({'project_assignment': assignment} if isinstance(assignment, dict) else {}),
             'subscription': {
                 'armed': armed,
                 'subscription_id': notification.get('subscription_id') or None,

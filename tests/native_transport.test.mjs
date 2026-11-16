@@ -30,7 +30,7 @@ function fixture(t, overrides = {}) {
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const workspace = path.join(dir, 'workspace'); fs.mkdirSync(workspace);
   const ownershipPath = path.join(dir, 'private', 'owned.json');
-  const calls = [], sessions = new Map(), durableSessions = new Set();
+  const calls = [], sessions = new Map(), durableSessions = new Set(), notifications = [];
   let serial = 0, identity = 'test-engine-one', unloaded = false, relationshipParent, verifiedChildId = 'sess_child';
   const notReady = () => {
     const error = new Error('Session runtime is not ready');
@@ -133,7 +133,14 @@ function fixture(t, overrides = {}) {
       if (overrides.rejectSend) return { commandId: input.envelope.commandId, ...overrides.rejectSend };
       return { status: 'accepted', commandId: input.envelope.commandId };
     },
-    async reconcileSessionsIndexV4(input) { record('reconcileSessionsIndexV4', input); return { sessions: [{ sessionId: input.sessionIds[0], exists: true, title: 'Native index' }] }; },
+    // Mirrors the engine: a created-only session has no persisted CLI fact yet,
+    // so reconcile reports exists:false until the first input was accepted.
+    async reconcileSessionsIndexV4(input) {
+      record('reconcileSessionsIndexV4', input);
+      const durable = durableSessions.has(input.sessionIds[0]);
+      return { sessions: [{ sessionId: input.sessionIds[0], exists: durable,
+        ...(durable ? { title: 'Native index' } : {}) }] };
+    },
     async listSessionSubagents(input) {
       record('listSessionSubagents', input); relationshipParent = input.sessionId;
       if (overrides.restartAfterChildRelations) identity = 'different-engine';
@@ -161,13 +168,35 @@ function fixture(t, overrides = {}) {
       return { events: [{ sequence: 3, type: 'phase-entered', payload: { name: 'third' } }], hasMore: false };
     },
   };
+  // Mirrors Xi: syncSessionFacts applies the facts and emits its own list event
+  // when the row changed; the transport must not emit a second one in that case.
+  const syncer = {
+    ensureWorkspaceSubscription(input) { record('ensureWorkspaceSubscription', input); },
+    async syncSessionFacts(input) {
+      notifications.push({ name: 'syncSessionFacts', input: copy(input) });
+      if (overrides.syncThrows) throw Object.assign(new Error('task index unavailable'), { code: 'index_unavailable' });
+      const durable = durableSessions.has(input.sessionId);
+      if (overrides.syncMissing === true || !durable) {
+        return { changed: false, missing: true, facts: [{ sessionId: input.sessionId, exists: false }] };
+      }
+      const changed = overrides.syncChanged ?? true;
+      notifications.push({ name: 'factsReady', sessionId: input.sessionId });
+      if (changed) notifications.push({ name: 'emitWorkspaceTaskListChanged',
+        ref: { workspacePath: input.workspacePath, taskId: input.sessionId }, reason: 'task_created' });
+      return { changed, facts: [{ sessionId: input.sessionId, exists: true, title: 'Native index' }] };
+    },
+    emitWorkspaceTaskListChanged(ref, meta, reason) {
+      notifications.push({ name: 'emitWorkspaceTaskListChanged', ref: copy(ref), reason, meta: meta ?? null });
+    },
+  };
   const options = { agent, ownershipPath, resolveWorkspace: (value) => value === workspace ? workspace : null,
-    makeEnvelope: (value) => ({ ...value, issuedAt: 100 }), syncer: () => ({ ensureWorkspaceSubscription(input) { record('ensureWorkspaceSubscription', input); } }) };
+    makeEnvelope: (value) => ({ ...value, issuedAt: 100 }), syncer: () => syncer,
+    ...(overrides.resolveProjectId ? { resolveProjectId: overrides.resolveProjectId } : {}) };
   let transport = createZcodeDesktopNativeTransport(options);
   const request = (op, extra = {}) => ({ op, workspace, caller_permission_mode: 'full_access', ...extra });
   const call = (op, extra) => transport.call(request(op, extra));
   const create = (extra = {}) => call('native_create', { request_id: 'create-request-1', model: chosen, thought_level: 'high', ...extra });
-  return { calls, sessions, durableSessions, workspace, ownershipPath, request, call, create,
+  return { calls, sessions, durableSessions, notifications, workspace, ownershipPath, request, call, create,
     reload() { transport = createZcodeDesktopNativeTransport(options); },
     restartEngine() { identity = 'different-engine'; }, unloadSession() { unloaded = true; } };
 }
@@ -186,7 +215,10 @@ test('real module wires plan catalogue, closes probe, then creates requested nat
   assert.equal(creates[1].input.projectId, 'requested-project');
   assert.equal(f.calls.filter((c) => c.name === 'closeSession').length, 1);
   assert(!f.sessions.has('sess_test_1')); assert(!f.calls.some((c) => c.name === 'sendConversationCommandV4'));
-  assert.equal(result.desktopIndexFacts.sessions[0].exists, true);
+  // Create alone has no persisted CLI fact: the index reports exists:false.
+  assert.equal(result.desktopIndexFacts.sessions.length, 1);
+  assert.equal(result.desktopIndexFacts.sessions[0].sessionId, result.sessionId);
+  assert.equal(result.desktopIndexFacts.sessions[0].exists, false);
 });
 
 test('model and model-specific effort fail closed; failed probes never become sendable', async (t) => {
@@ -741,4 +773,156 @@ test('recorded dispatch errors and explicit native rejection have different outc
     interaction_id: 'actual-interaction', answer: { action: 'invented-action' } });
   assert.equal(invalid.error, 'invalid_answer'); assert.equal(invalid.request.status, 'failed');
   assert(!f.calls.some((c) => c.name === 'sendConversationCommandV4'));
+});
+
+test('one active project that owns the workspace is reused for the created session', async (t) => {
+  const queries = [];
+  const f = fixture(t, { resolveProjectId: async (input) => {
+    queries.push(copy(input));
+    return { status: 'unique', projectId: 'prj_workspace' };
+  } });
+  const response = await f.create();
+  assert.equal(response.ok, true);
+  assert.equal(queries.length, 1, 'the resolver runs once per native_create');
+  assert.equal(queries[0].workspacePath, f.workspace);
+  assert.equal(queries[0].projectId, null, 'no project is inferred for the caller');
+  assert.deepEqual(response.result.projectAssignment,
+    { status: 'assigned', projectId: 'prj_workspace', source: 'workspace' });
+  const creates = f.calls.filter((c) => c.name === 'createSession');
+  assert.equal(creates.length, 2);
+  assert.equal(creates[0].input.projectId, null, 'the deferred catalogue probe is never attached to a project');
+  assert.equal(creates[1].input.projectId, 'prj_workspace');
+  assert.equal(f.calls.filter((c) => c.name === 'ensureWorkspaceSubscription').length, 1);
+  assert.deepEqual(f.notifications, [], 'create-only must not emit a list refresh');
+});
+
+test('no matching project keeps the session explicitly unassigned', async (t) => {
+  const f = fixture(t, { resolveProjectId: async () => ({ status: 'none', projectId: null }) });
+  const response = await f.create();
+  assert.equal(response.ok, true);
+  assert.deepEqual(response.result.projectAssignment, { status: 'unassigned', projectId: null, source: 'none' });
+  assert.equal(f.calls.filter((c) => c.name === 'createSession')[1].input.projectId, null);
+});
+
+test('an ambiguous workspace is rejected before catalogue, subscription or create', async (t) => {
+  const f = fixture(t, { resolveProjectId: async () => ({ status: 'ambiguous', projectId: null, count: 2 }) });
+  const response = await f.create();
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'project_ambiguous');
+  assert.equal(response.request.status, 'failed'); assert.equal(response.request.phase, 'validated');
+  assert.equal(f.calls.filter((c) => c.name === 'createSession').length, 0);
+  assert(!f.calls.some((c) => c.name === 'closeSession' || c.name === 'ensureWorkspaceSubscription'));
+  assert.deepEqual(f.notifications, []);
+  assert(!f.sessions.size);
+});
+
+test('an explicit project id must exist, be active and contain the workspace', async (t) => {
+  const f = fixture(t, { resolveProjectId: async ({ projectId }) => {
+    if (projectId === 'prj_ok') return { status: 'unique', projectId };
+    if (projectId === 'prj_old') return { status: 'inactive', projectId: null };
+    return { status: projectId === 'prj_missing' ? 'not_found' : 'workspace_mismatch', projectId: null };
+  } });
+  for (const [projectId, code] of [['prj_missing', 'project_not_found'], ['prj_old', 'project_inactive'],
+    ['prj_elsewhere', 'project_workspace_mismatch']]) {
+    const response = await f.create({ project_id: projectId, request_id: 'create-' + projectId });
+    assert.equal(response.error, code, projectId);
+    assert.equal(f.calls.filter((c) => c.name === 'createSession').length, 0);
+  }
+  const ok = await f.create({ request_id: 'create-explicit-ok', project_id: 'prj_ok' });
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.result.projectAssignment, { status: 'assigned', projectId: 'prj_ok', source: 'caller' });
+  assert.equal(f.calls.filter((c) => c.name === 'createSession')[1].input.projectId, 'prj_ok');
+});
+
+test('create-stage facts are missing and only the first accepted input makes them durable', async (t) => {
+  const f = fixture(t, { resolveProjectId: async () => ({ status: 'unique', projectId: 'prj_workspace' }) });
+  const created = await f.create();
+  const sid = created.result.sessionId;
+  // Reproduces the observed create-only state: no persisted CLI fact yet.
+  assert.equal(created.result.desktopIndexFacts.sessions[0].exists, false);
+  assert(!f.durableSessions.has(sid));
+  assert.deepEqual(f.notifications, [], 'create alone has no durable CLI fact and must not notify');
+  const first = await f.call('native_send', { session_id: sid, request_id: 'first-durable-send', text: 'first' });
+  assert.equal(first.ok, true);
+  // Acceptance is what creates the durable fact, so the single import succeeds.
+  assert(f.durableSessions.has(sid));
+  assert.deepEqual(first.result.listNotification, { state: 'facts_imported', changed: true });
+  assert.equal(f.notifications.filter((n) => n.name === 'syncSessionFacts').length, 1);
+  assert.equal(f.notifications.filter((n) => n.name === 'factsReady').length, 1);
+  assert.equal(f.notifications.filter((n) => n.name === 'emitWorkspaceTaskListChanged').length, 1);
+  assert.deepEqual(f.notifications.find((n) => n.name === 'syncSessionFacts').input,
+    { workspacePath: f.workspace, sessionId: sid }, 'no workspace identity, prompt or token is sent');
+});
+
+test('a changed=false import still produces exactly one list event', async (t) => {
+  const f = fixture(t, { syncChanged: false });
+  const sid = (await f.create()).result.sessionId;
+  const first = await f.call('native_send', { session_id: sid, request_id: 'first-unchanged-send', text: 'first' });
+  assert.deepEqual(first.result.listNotification, { state: 'facts_imported', changed: false });
+  const emits = f.notifications.filter((n) => n.name === 'emitWorkspaceTaskListChanged');
+  assert.equal(emits.length, 1);
+  assert.deepEqual(emits[0].ref, { workspacePath: f.workspace, taskId: sid });
+  assert.equal(emits[0].reason, 'native_project_facts');
+});
+
+test('later sends, reads and replays never repeat the list refresh', async (t) => {
+  const f = fixture(t);
+  const sid = (await f.create()).result.sessionId;
+  const first = { session_id: sid, request_id: 'first-once', text: 'first' };
+  assert.equal((await f.call('native_send', first)).ok, true);
+  const baseline = f.notifications.length;
+  assert.equal((await f.call('native_send', { session_id: sid, request_id: 'second-send', text: 'second' })).ok, true);
+  assert.equal((await f.call('native_snapshot', { session_id: sid })).ok, true);
+  assert.equal((await f.call('native_messages', { session_id: sid })).ok, true);
+  const replay = await f.call('native_send', first);
+  assert.equal(replay.ok, true); assert.equal(replay.result.replay, true);
+  assert.equal(f.notifications.length, baseline, 'no second import and no second list event');
+});
+
+test('notification failure or missing facts stays diagnostic and is never retried', async (t) => {
+  const thrown = fixture(t, { syncThrows: true });
+  const thrownSid = (await thrown.create()).result.sessionId;
+  const first = await thrown.call('native_send', { session_id: thrownSid, request_id: 'first-throws', text: 'first' });
+  assert.equal(first.ok, true, 'an accepted send is not turned into a failure');
+  assert.deepEqual(first.result.listNotification, { state: 'failed', error: 'index_unavailable' });
+  assert.equal(thrown.notifications.filter((n) => n.name === 'syncSessionFacts').length, 1);
+  const later = await thrown.call('native_send', { session_id: thrownSid, request_id: 'second-throws', text: 'second' });
+  assert.equal(later.result.listNotification, undefined);
+  assert.equal(thrown.notifications.filter((n) => n.name === 'syncSessionFacts').length, 1);
+
+  const missing = fixture(t, { syncMissing: true });
+  const missingSid = (await missing.create()).result.sessionId;
+  const noFacts = await missing.call('native_send', { session_id: missingSid, request_id: 'first-missing', text: 'first' });
+  assert.equal(noFacts.ok, true);
+  assert.deepEqual(noFacts.result.listNotification, { state: 'facts_unavailable' });
+  assert.equal(missing.notifications.filter((n) => n.name === 'emitWorkspaceTaskListChanged').length, 0);
+  await missing.call('native_send', { session_id: missingSid, request_id: 'second-missing', text: 'second' });
+  assert.equal(missing.notifications.filter((n) => n.name === 'syncSessionFacts').length, 1);
+});
+
+
+test('sends never re-create or re-attribute an existing owned session', async (t) => {
+  let queries = 0;
+  const f = fixture(t, { resolveProjectId: async () => {
+    queries += 1;
+    return { status: 'unique', projectId: 'prj_workspace' };
+  } });
+  const created = await f.create();
+  const sid = created.result.sessionId;
+  const creates = f.calls.filter((c) => c.name === 'createSession').length;
+  await f.call('native_send', { session_id: sid, request_id: 'first-attribute', text: 'first' });
+  await f.call('native_send', { session_id: sid, request_id: 'second-attribute', text: 'second' });
+  assert.equal(f.calls.filter((c) => c.name === 'createSession').length, creates);
+  assert.equal(f.calls.filter((c) => c.name === 'createSession').at(-1).input.projectId, 'prj_workspace');
+  assert.equal(created.result.projectAssignment.projectId, 'prj_workspace');
+  assert.equal(queries, 1, 'only create resolves a project; sends never re-attribute');
+});
+
+test('the resolver and notification paths add no timers, polling or generic channel', () => {
+  const source = fs.readFileSync(new URL('../runtime/desktop_sync/native_transport.mjs', import.meta.url), 'utf8');
+  assert(!/setInterval\s*\(/.test(source));
+  assert(!/setTimeout\s*\(/.test(source));
+  assert(!/eval\s*\(/.test(source));
+  assert(!/new Function\s*\(/.test(source));
+  assert(!/child_process/.test(source));
 });

@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'runtime'))
 from zcode_bridge import storage
 from zcode_bridge.desktop_native import DesktopNativeError
 from zcode_bridge.identity import is_visible_message, message_identity
-from zcode_bridge.service import Bridge
+from bridge_fixtures import MockBridge as Bridge
 
 
 def message(index, role='assistant', hidden=False):

@@ -3,7 +3,7 @@
   "plugins": [
     {
       "name": "codex-to-zcode-bridge",
-      "version": "0.5.3",
+      "version": "0.5.4",
       "source": "./plugins/zcode",
       "description": "Codex to ZCode Bridge administration and local MCP tools."
     }

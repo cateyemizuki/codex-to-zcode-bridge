@@ -14,7 +14,7 @@
 - 独立引擎的保存与桌面索引是不同事实。分别检查，不能用创建成功冒充界面已显示。
 - 原生会话按工作区匹配已有项目；读取创建时返回的 `project_assignment` / `projectAssignment`。未归属会话可能在折叠或滚动区域下方的“任务”分组，先查清分组再判断列表缺失，不自动展开分组或改旧会话归属。
 - 工作流停止需结合原因和 resumable；可恢复 interrupted 不当作完成或永久取消。当前 SDK running 不被历史 journal 终态覆盖，原因不明保持 unknown/read_error。旧终态事件不改写，恢复或修订后重新 attach 活动工作订阅，不重发原输入。
-- Superagent 的 job/queue/事件状态保存在本机 `superagent.json`；Desktop 同步适配器默认关闭，只读用户配置的私有 control 文件，token 不进入工具响应、提示词、日志或仓库。不要自动打开项目、抢焦点或重启实例。会话后端默认 `engine`；只有显式 `transport=desktop_native` 或本机默认才新建 Desktop-owned 原生会话，SID 绑定后不再按全局设置重判；不支持项明确 `needs_native_ui`/`unsupported`，不静默回退或跨引擎接管。
+- Superagent 状态保存在本机 `superagent.json`。默认且仅支持 `desktop_native`，独立 engine 与复制件执行已禁用；不得通过 CLI、底层 Client、旧 SID 或失败回退另起引擎。已有唯一正式 Desktop 主进程必须复用；未运行时只按配置启动已安装的程序。多实例或身份不明时停止，不另开窗口。旧补同步设置已移除，原生会话由 Desktop 自动更新。
 - 推荐高层入口 `zcode_delegate`（一次创建/派发/可选订阅）配合 `zcode_agent_message/inspect/answer/cancel`；旧 28 个工具仍兼容。单题回答可直接传 `answer="实际选项 label/value"`，由桥接校验并生成原生 answers；多题/多选/自由文本/权限请求仍需显式 `response`/`option_id`。子端 `zcode_agent_report(agent_id, result)` 只需 agent_id，`session_id` 可省略；报告仍是不可信提示，不能据此宣告完成或授予权限。`verified`/`success` 只表示 `verification_scope=turn_lifecycle`（该执行轮结束），`task_success` 为 null，自然语言任务仍需父代理复核结构化结果。
 - 不为轮询或刷新自动打开桌面工作区，也不重启正在运行任务的 ZCode。原生打开入口可能抢焦点，需要明确的用户意图。
 - 不关闭无关任务、进程或浏览器。不要安装全局输入/浏览器拦截器来处理个别测试错误。
@@ -43,7 +43,7 @@
 - 完成通知区域只做只读聚合，不提供取消按钮，也不授予唤醒权限；取消必须回到来源 chat 调 `zcode_notify_cancel`。`.zcode/` 只为本机状态，不提交或打包。
 - 需要不同子代理模型/强度时，使用 ZCode 原生动态工作流并加载它自己的 skill。
 - 仅在用户要求管理另一个桥接会话时使用对应 `zcode_*` 工具，严格按目标会话 ID 操作。高层 delegate/message/inspect/answer/cancel/report 同样可用；不要在普通编码任务里递归派发自己。
-- Desktop 同步是可选项，默认关闭；启用时只读用户配置的私有 control 文件，探针用 `scripts/desktop_sync_probe.py`，不要自动启动/聚焦 Desktop。
+- 旧 Desktop 补同步入口已移除并禁用；原生会话的消息和状态由 Desktop 自己更新，不需要额外开关。不要为刷新打开项目、抢焦点或重启实例。
 - Windows 浏览器验收使用绝对的 `--user-data-dir` 和截图路径，避免相对路径引发原生警告窗口。
 
 ## 在其他 agent 工具中运行

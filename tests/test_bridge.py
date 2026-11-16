@@ -12,7 +12,8 @@ from unittest.mock import Mock, patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'runtime'))
 from zcode_bridge import mcp, storage
 from zcode_bridge.protocol import ProtocolError
-from zcode_bridge.service import Bridge, ObserverRuntimeAdapter, caller_mode, compact_messages
+from zcode_bridge.service import ObserverRuntimeAdapter, caller_mode, compact_messages
+from bridge_fixtures import MockBridge as Bridge
 from zcode_bridge.tools import TOOLS
 from zcode_bridge.workflows import actor_session_id, topology
 
@@ -329,15 +330,16 @@ class BridgeTests(unittest.TestCase):
         self.bridge.rpc.assert_not_called()
 
     def test_auto_launch_when_absent_uses_real_executable(self):
-        with patch('zcode_bridge.service.desktop_running',return_value=False),patch('zcode_bridge.service.subprocess.Popen') as launch:
+        with patch('zcode_bridge.service.ensure_desktop', return_value={
+                'running':True,'pid':1,'already_running':False,'launched':True}) as ensure:
             result=self.bridge.launch()
         self.assertTrue(result['launched'])
-        self.assertEqual(Path(launch.call_args.args[0][0]).name,'ZCode.exe')
+        self.assertEqual(Path(ensure.call_args.args[0]).name,'ZCode.exe')
 
     def test_does_not_launch_duplicate_desktop(self):
-        with patch('zcode_bridge.service.desktop_running',return_value=True),patch('zcode_bridge.service.subprocess.Popen') as launch:
+        with patch('zcode_bridge.service.ensure_desktop', return_value={
+                'running':True,'pid':1,'already_running':True,'launched':False}):
             self.assertTrue(self.bridge.launch()['already_running'])
-        launch.assert_not_called()
 
     def test_invalid_config_object_fails_clearly(self):
         storage.write_json(Path(self.tmp.name)/'config.json',[])

@@ -1,5 +1,13 @@
 # 验证记录
 
+## 0.5.4 正式 Desktop 唯一路线（2026-11-16）
+
+- `python -m unittest discover -s tests -q`：584 项通过，76.894 秒；其中 15 项直接测试生产 Bridge 的原生默认值、显式 engine 拒绝、底层启动禁用、宿主身份验证、状态/模型原生查询、主实例复用及内部脚本工作进程识别。
+- 旧快照、历史数据与通用 job 状态机回归使用测试目录中的内存 RPC fixture，不会启动真实独立引擎；生产 runtime 没有开启 legacy 引擎的开关。
+- `python build.py --check`：两侧生成包一致；`python scripts/audit_release.py`：231 个源码/归档条目检查通过；`git diff --check` 通过。
+- 本机重新安装并单独重载桥接后，实际返回版本 0.5.4、`transport=desktop_native`、`independent_engine_enabled=false`、`engine_pid=null`，并识别唯一正式 Desktop 主进程；未启动新窗口或复制件。
+- 正式安装中的自有接入文件已按原件/旧补丁哈希和整树基线核对后更新，保留备份与 ledger，EXE 和引擎文件未变。当前已加载旧 JS 的 Desktop 尚待用户重启；本条不声称新版会话创建或 GUI 验收已通过。
+
 ## 0.5.3 工作区黑名单回归（2026-11-16）
 
 - 首轮全量：`python -m unittest discover -s tests -q`，569 项通过；新规则的 8 项 Python 回归含 4 项 Node 行为测试。

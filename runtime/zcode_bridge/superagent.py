@@ -46,7 +46,7 @@ PERMISSION_MODES = ('full_access', 'review_important_actions', 'ask_before_write
                     'always_ask', 'read_only')
 PERMISSION_SOURCES = ('explicit_caller',)
 WORKFLOW_MODES = ('disabled', 'onDemand', 'alwaysOn', 'native_default')
-TRANSPORTS = ('engine', 'desktop_native')
+TRANSPORTS = ('desktop_native',)
 STATUSES = ('created', 'dispatching', 'running', 'action_required', 'reported',
             'verified', 'send_uncertain', 'stalled', 'unobservable',
             'failed', 'cancelled', 'expired', 'unknown')
@@ -371,9 +371,9 @@ def resolve_profile(*, explicit=None, bound_profile='', profiles=None, defaults=
 
     transport, transport_source = _pick(explicit, profile_row, defaults,
                                         'transport', 'default_transport')
-    transport = str(transport or 'engine')
+    transport = str(transport or 'desktop_native')
     if transport not in TRANSPORTS:
-        raise SuperagentError('transport_invalid', '传输后端无效；只支持 engine 或 desktop_native',
+        raise SuperagentError('independent_engine_disabled', '只支持唯一 Desktop 的 desktop_native 后端',
                               transport=transport)
 
     workspace, workspace_source = _resolve_workspace_value(

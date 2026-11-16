@@ -14,7 +14,8 @@ from zcode_bridge import mcp, notifications, storage
 from zcode_bridge.desktop_native import DesktopNativeError
 from zcode_bridge.notifications import Observer
 from zcode_bridge.protocol import ProtocolError
-from zcode_bridge.service import Bridge, ObserverRuntimeAdapter
+from zcode_bridge.service import ObserverRuntimeAdapter
+from bridge_fixtures import MockBridge as Bridge
 from zcode_bridge.tools import TOOLS
 
 CTX_A = {'thread_id': 'chat-A', 'thread_origin': 'turn_metadata'}
@@ -281,6 +282,8 @@ class SuperagentServiceTests(unittest.TestCase):
         self.workspace.mkdir()
         self.cfg = patch('zcode_bridge.service.config', return_value={
             **storage.defaults(),
+            # Generic state-machine tests use FakeEngine in memory only.
+            'default_transport': 'engine',
             'zcode_executable': str(executable), 'auto_launch_desktop': False,
             'default_model': dict(MODEL), 'default_thought_level': 'high',
             'default_workspace': str(self.workspace),

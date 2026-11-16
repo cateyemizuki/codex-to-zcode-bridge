@@ -181,13 +181,15 @@ class ConfigurationTests(SuperagentFixture):
         with tempfile.TemporaryDirectory() as temporary, patch.dict(
                 os.environ, {'ZCODE_BRIDGE_STATE': temporary, 'ZCODE_WORKSPACE': workspace}):
             saved = storage.save_config({
-                'desktop_sync_enabled': True,
+                'desktop_sync_enabled': False,
                 'desktop_sync_control_file': str(Path(temporary) / 'control.json'),
                 'desktop_sync_min_interval_seconds': 7,
                 'superagent_stall_seconds': 120,
                 'superagent_read_failure_threshold': 3,
             })
-            self.assertTrue(saved['desktop_sync_enabled'])
+            self.assertFalse(saved['desktop_sync_enabled'])
+            with self.assertRaisesRegex(ValueError, 'legacy_desktop_sync_disabled'):
+                storage.save_config({'desktop_sync_enabled': True})
             self.assertEqual(saved['desktop_sync_min_interval_seconds'], 7)
             self.assertEqual(saved['superagent_stall_seconds'], 120)
             for changes in ({'desktop_sync_enabled': 'true'},

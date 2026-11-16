@@ -34,15 +34,15 @@
 
 旧工具：`zcode_status/models/create_session/sessions/read_session/send/messages/subagents/set_model/set_permissions/pending/answer/wait/events/workflows/stop` 与 6 个通知工具、`zcode_settings`、`zcode_open_settings` 全部保留。MCP 工具总数为 34（32 控制 + 2 原生设置）。
 
-## 2.1 会话后端：独立引擎 / 桌面原生（实验）
+## 2.1 会话后端：正式 Desktop 原生宿主
 
-- 选择方式：`zcode_create_session` / `zcode_delegate` 的 `transport=engine|desktop_native`，或 profile 的 `transport`，或本机 `default_transport`。旧 profile 没有该字段时仍是 `engine`，旧 28+ 工具行为不变。
+- 默认且仅支持 `desktop_native`；公共工具和 profile 不再接受 `engine`。旧后端偏好在新任务上迁移为原生，旧 engine SID 保留历史但不能恢复或跨引擎接管。
 - 绑定按 SID 持久化在 `sessions.json`。已经创建/绑定的 SID 按自己的 `transport` 路由，不会因为当前全局设置改变而重判；独立引擎 SID 不会被原生后端接管，原生 SID 也不会被旧同步或独立引擎冷恢复。
 - `desktop_native` 只在显式启用 `desktop_native_enabled` 且配置私有 `desktop_native_control_file`（其中 `nativeTransport.enabled=true`）时工作；host 未就绪、`unsupported`、`stale_owner`、`unknown` 均明确返回，不退回独立引擎、不自动打开项目/抢焦点/重启、不恢复 foreign SID。token 不进入响应、日志、提示词或仓库。
 - 原生请求按实际源码：每条带 `workspace` 和当前 `caller_permission_mode`；`native_model_catalog` / `native_create` / `native_send` / `native_resolve` / `native_cancel` 带稳定 `request_id`。`native_snapshot.result` 是 snapshot 对象，`native_messages.result` 直接是数组；`native_pending` 只是写请求结果查询，不是交互问题队列。问题从 snapshot 的 `pendingInteractions`/`pendingPermissions` 读取，用真实 interaction/option ID 回答。
 - 原生发送前若当前权限低于会话原权限，按当前值降级并校验；未知写结果不自动重发。ACK 归一化按真实形状：首发 `status='accepted'` + `nativeAdmission.accepted=true`，后续 V4 `status='accepted'`/`inputAccepted` 均视为 admission；`replay`/`pending`/`unknown`/`duplicate`/`noop` 不当作 accepted，保持 uncertain，绝不重发。原生暂不暴露 model setter、saved workflow catalog 和 background cancel；这些返回 `needs_native_ui`/`unsupported`。原生 `zcode_agent_cancel` 只做前台 stop；有活动后台任务时返回明确 pending。
 - 原生完成通知已接入现有 Observer/Delivery：按 SID 读 native snapshot/messages/events/jobs/workflows/pending，订阅在发送前持久化，admission 后用 host 实际 `commandId`/inputId 替换临时 id，只有真实 `turn.started`/`turn.completed` + 新 assistant 消息 + stable idle 才完成；pending/后台/未证明 anchor/unknown/read error 都不完成。不会为通知偷偷创建独立 engine 或挪用其他 engine 身份。
-- `attach_report_mcp=true`（仅 engine）会在 `session/create` 的 `mcpServers` 中附加一个 session-local、只暴露 `zcode_agent_report` 的薄 MCP 入口（`python -m zcode_bridge.report_mcp`，路径由本机 `sys.executable`/runtime/state 动态生成）。它不暴露 delegate/message 等控制能力，不改全局 plugin registry，不自动 grant workspace trust。原生 host 没有 `mcpServers` 参数，因此 native create 对该标志明确 `unsupported`；没接通前不得声称工具已加载。
+- `attach_report_mcp=true` 在原生会话中明确 unsupported；不能另起独立引擎补足该能力。
 - 状态：`zcode_status.native_transport` 与设置面板“会话后端”组显示 disabled/not_configured/native_disabled/ready 和最近一次状态；只给状态码，不含 source、token、路径。
 - GUI 通过范围：根代理只在其测试的 3.18.2 隔离复制件、当前固定 native op 上验证了“同页先 BEGIN/Bash 等待后自动 END/发送恢复”。公共跨版本仍受版本与 SHA-256 门禁约束；本工作树没有重跑 GUI，也不把该证据外推到其他版本或运行实例。
 
@@ -78,53 +78,13 @@
 - `zcode_agent_inspect` 在本轮读取失败/进度写入之后重新读取 job，因此同一响应里的 `job.read_failures`/`observation` 与 `errors` 一致。
 - 事件 ID、订阅 ID、输入 ID 稳定；重启后读取同一状态；超时/过期只映射 `expired`，不会静默成功。
 
-## 5. Desktop 同步（可选，默认关闭）
+## 5. 桌面原生连接与自动更新
 
-配置（本机 `config.json`，可由原生设置/内嵌面板修改）：
-
-- `desktop_sync_enabled`：默认 `false`。
-- `desktop_sync_control_file`：私有 `control.json` 路径，默认空；token 只从该文件读取，不进入设置值、工具响应、提示词或日志。
-- `desktop_sync_min_interval_seconds`：默认 5，范围 1–300。
-- `superagent_stall_seconds`：默认 600，范围 60–86400。
-- `superagent_read_failure_threshold`：默认 5，范围 2–50。
-- `default_transport`：默认 `engine`；可选 `desktop_native`（实验，失败不回退）。
-- `desktop_native_enabled`：默认 `false`。
-- `desktop_native_control_file`：私有 control.json 路径，默认空；必须已启用 `nativeTransport`，token 不进入设置值或响应。
-
-前置步骤（可选，必需时才做）：
-
-1. 用 `scripts/desktop_sync_copy.py prepare` 复制并打补丁到隔离副本；版本、host/engine SHA-256、锚点数量任一不符即拒绝。补丁工具不在默认安装包内，需从仓库取得。
-2. 用 `scripts/desktop_sync_shim.py configure --port 0` 生成私有 `control.json`；默认黑名单只屏蔽 C 盘及其子路径。旧规则迁移及显式白名单见 [工作区规则](WORKSPACE_POLICY.md)。
-3. 在插件设置中开启 `desktop_sync_enabled` 并把 `desktop_sync_control_file` 指向该私有文件。
-4. 正常派发/跟进/终态后，适配器异步按 workspace 合并请求；最多 50 个 session；配置/token/endpoint 失败只记录状态，不影响业务。
-
-探针命令（不会打开项目、不会抢焦点）：
-
-```powershell
-python scripts/desktop_sync_probe.py --control <private>/control.json --op status
-python scripts/desktop_sync_probe.py --control <private>/control.json --op probe
-python scripts/desktop_sync_probe.py --control <private>/control.json --op sync --workspace <allowed-workspace> --session-id <session-id> --confirm-sync
-```
-
-GUI 肉眼验收步骤与预期：
-
-1. 用户明确要求后，手动启动隔离副本（`desktop_sync_copy.py launch ... --execute`）；探针脚本本身不启动、不打开、不聚焦。
-2. 在隔离副本中打开一个已存在的会话，记录第一条助手回复的可见标记。
-3. 通过独立 engine 或 `scripts/superagent_live_check.py --confirm-live ...` 向该会话写入第二条带唯一标记的消息。
-4. 运行 `desktop_sync_probe.py --op sync`（显式 `--confirm-sync`）。
-5. 预期：同一打开页面在无导航、无刷新的情况下出现第二条标记；host 侧发出 `workspace_task_list_changed`；若没有出现，记录 `probe` 的 ready/event 计数和 sync 的 changed/missing/errors，不能声称已刷新。
-6. 侧栏项目归属需另行确认；`desktop.indexed=true` 只代表索引收录，不等于项目分组或 GUI 已显示。
-
-### 5.1 会话级 MCP 工具加载（只读源码核查，未实现）
-
-- 3.18.2 的 `session/create` 参数 schema（内部 `Zat`）包含 `mcpServers?: k_e[]`；`k_e` 是**完整 server 定义**的联合，不是已有 server 名选择器：
-  - stdio：`{name, scope?, command, cwd?, args: string[], env, isolation?, protocolVersion?, alwaysLoad?, timeoutMs?}`；
-  - http/sse：`{name, scope?, type:'http'|'sse', url, headers, oauth?, isolation?, protocolVersion?, alwaysLoad?, timeoutMs?}`。
-  - handler 把 `mcpServers` 传给 `createSessionRecord`。
-- 原生 `mcp/list`（方法 `mcp/list`，params `{workspace, mcpServers?, mode:'connect'|'status'}`）返回每个 server 的 `status`（含 `connected`/`failed`/`untrusted`）与 `toolCount`，是验证“工具是否真的加载”的正确探针。插件根的 `.mcp.json` 是插件清单，不是 workspace 配置；它不出现在原生 `mcp/list`。
-- workspace-local 配置是 `<workspace>/.agents/mcp.json`，格式 `{mcpServers: {name: config}}`；workspace 声明受 trust 门禁：`workspace/mcp/trust` params `{workspace, serverName, declarationDigest, trusted}`，trust 记录在 user config 同目录的 `workspace-mcp-trust-v1.json`。
-- **未确认**：per-session `mcpServers` 是否绕过 workspace trust，以及工具是否马上进入该会话的模型工具列表；必须在真实隔离会话用 `mcp/list(mode=connect)` 看 `status`/`toolCount`。
-- 最小接线（未实现）：在 create/delegate 入口增加可选配置，把 stdio 定义随 `session/create` 传入，例如 `{name:'zcode-superagent', command:<python>, args:['-m','zcode_bridge.report_mcp'], cwd:<plugin runtime>, isolation:'session', alwaysLoad:true}`；为最小权限只暴露 `zcode_agent_report`，不要暴露完整 `zcode_*` 以免子代理递归派发。不要靠往工作区写 `.mcp.json` 来假装已加载。
+- `default_transport` 固定为 `desktop_native`，`desktop_native_enabled` 默认 `true`。
+- `desktop_native_control_file` 指向正式 Desktop 的本机私有接入；token 不进入设置值或日志。
+- 已有唯一主进程直接复用；未运行时只按配置启动已安装的主程序。多实例或身份不符时停止。
+- 会话、消息和任务状态由 Desktop 自动更新。旧的 Desktop 补同步配置已移除并禁止重新启用。
+- 接入步骤与版本边界见 [正式安装](DESKTOP_NATIVE_INSTALL.md)，默认值和行为见 [桌面连接](DESKTOP_ONLY.md)。
 
 ## 6. 真实验收入口
 

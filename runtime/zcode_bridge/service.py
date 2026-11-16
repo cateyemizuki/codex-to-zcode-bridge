@@ -11,7 +11,7 @@ import uuid
 from collections import deque
 from pathlib import Path
 
-from .protocol import Client, ProtocolError
+from .protocol import ProtocolError
 from .desktop import session_visibility
 from .storage import (config, configured_default_workspace, defaults, read_json,
                       save_config, state_dir, write_json)
@@ -25,6 +25,7 @@ from .delivery import DeliveryWorker
 from .host_wake import HostWakeAdapter
 from .desktop_sync import DesktopSyncAdapter
 from .desktop_native import DesktopNativeAdapter, DesktopNativeError
+from .desktop_instance import ensure_desktop, inspect_desktop, DesktopInstanceError
 from .superagent import (ACTIVE_STATUSES, MAX_MESSAGE_CHARS, MAX_QUEUE_ITEMS,
                          TERMINAL_JOB_STATUSES, SuperagentError, SuperagentStore,
                          bounded_report_payload, build_task_prompt, resolve_profile,
@@ -301,7 +302,7 @@ class Bridge:
         self.superagent_drain_lock = threading.Lock()
         self._subtree_discovery_at = {}
         self.desktop_sync = DesktopSyncAdapter(settings_getter=config)
-        self.desktop_native = DesktopNativeAdapter(settings_getter=config)
+        self.desktop_native = DesktopNativeAdapter(settings_getter=config, ensure_desktop=self._ensure_native_desktop)
         self.observer = None
         self.delivery = None
         # The real adapter is created when the daemon starts; tests can inject
@@ -309,6 +310,7 @@ class Bridge:
         self.host_waker = None
         self._host_context = {}
         self._last_probe_at = 0.0
+        self._native_connection_proof = None
 
     # --------------------------------------------------------------- background
     def notification_settings(self):
@@ -428,52 +430,101 @@ class Bridge:
         if workspace is not None:
             if not allow_focus:
                 raise ValueError('打开桌面工作区会使 ZCode 获得焦点；仅在用户明确要求时设置 allow_focus=true')
-            # Forward slashes are not canonicalized consistently by Desktop
-            # 3.17.2 and can cause project.cwd-not-in-roots. Use native paths.
             workspace = Path(workspace).resolve()
             if not workspace.is_dir():
                 raise ValueError('指定工作区不存在')
-        running = desktop_running(cfg['zcode_executable'])
-        if workspace is not None or (not running and (force or cfg['auto_launch_desktop'])):
-            executable = Path(cfg['zcode_executable'])
-            if not executable.is_file():
-                raise ValueError('ZCode 程序不存在，请检查配置')
-            command = [str(executable)]
-            if workspace is not None:
-                command.extend(['--open-workspace', str(workspace)])
-            subprocess.Popen(command, cwd=executable.parent,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return {'already_running': running, 'launched': not running,
-                'workspace_open_requested': workspace is not None, 'may_focus': workspace is not None}
-        return {'already_running': running, 'launched': False,
-            'workspace_open_requested': False, 'may_focus': False}
+        try:
+            result = ensure_desktop(cfg['zcode_executable'],
+                                    allow_start=bool(force or cfg.get('auto_launch_desktop')))
+        except DesktopInstanceError as error:
+            raise DesktopNativeError(str(error), '无法确认唯一正式 ZCode Desktop；未启动其他实例') from error
+        return {**result, 'workspace_open_requested': False, 'may_focus': False,
+                'needs_native_ui': workspace is not None,
+                'note': '复用唯一桌面进程；切换可见项目请在 ZCode 内操作' if workspace is not None else ''}
 
     def backend(self, deadline=None):
-        with self.client_lock:
-            if self.client is None or self.client.child.poll() is not None:
-                self.launch()
-                self.client = Client(config(), self._request, self._event)
-                self.generation += 1
-                with self.lock:
-                    self.resident.clear()
-                    self.created.clear()
-                    self.pending.clear()
-                    self.answered.clear()
-            client = self.client
-            generation = self.generation
-        # capabilities is deliberately outside client_lock; a cold start plus
-        # resume must not serialize the observer behind a 40 s request.
-        if self.capabilities_generation != generation:
-            try:
-                timeout = self._remaining(deadline, cap=10) if deadline else 10
-                client.request('runtime/capabilities', timeout=timeout)
-                with self.client_lock:
-                    if generation == self.generation:
-                        self.capabilities_generation = generation
-            except Exception:
-                pass
-        return client
+        raise DesktopNativeError('independent_engine_disabled',
+                                 '仅支持唯一已安装 ZCode Desktop 的原生会话；不会启动独立引擎或副本')
+
+    def _ensure_native_desktop(self, allow_start=False):
+        cfg = config()
+        signature = (cfg['zcode_executable'], cfg.get('desktop_native_control_file'))
+        proof = self._native_connection_proof
+        if (not allow_start and proof and proof['signature'] == signature
+                and time.monotonic() - proof['at'] < 1):
+            return copy.deepcopy(proof['state'])
+        try:
+            state = ensure_desktop(cfg['zcode_executable'],
+                                   allow_start=allow_start and bool(cfg.get('auto_launch_desktop')))
+        except DesktopInstanceError as error:
+            raise DesktopNativeError(str(error), '请使用已配置的唯一正式 ZCode Desktop 实例') from error
+        until = time.monotonic() + (12 if state.get('launched') else 0)
+        while True:
+            probe = self.desktop_native.probe()
+            if probe.get('ok') and probe.get('ready') and probe.get('nativeAvailable'):
+                executable = str(probe.get('desktopExecutable') or '')
+                if not executable:
+                    raise DesktopNativeError('desktop_host_upgrade_required', '桌面接入缺少可执行文件身份信息；请加载新版接入')
+                if os.path.normcase(str(Path(executable).resolve())) != os.path.normcase(str(Path(cfg['zcode_executable']).resolve())):
+                    raise DesktopNativeError('desktop_host_mismatch', '控制文件对应另一个 ZCode 实例')
+                self._native_connection_proof = {'signature': signature, 'at': time.monotonic(),
+                                                 'state': copy.deepcopy(state)}
+                return state
+            if time.monotonic() >= until:
+                raise DesktopNativeError('native_host_not_ready', '请完成桌面原生接入并重载 ZCode；不会启动独立引擎')
+            time.sleep(.2)
+
+    @staticmethod
+    def _select_transport(value=None):
+        if value not in (None, '', 'desktop_native'):
+            raise DesktopNativeError('independent_engine_disabled', '仅支持 desktop_native；旧独立引擎后端已禁用')
+        return 'desktop_native'
+
+    def _desktop_status(self):
+        cfg = config()
+        error = ''
+        try:
+            desktop = inspect_desktop(cfg['zcode_executable'])
+        except DesktopInstanceError as failure:
+            desktop, error = {'running': False, 'pid': None}, str(failure)
+        native = self.desktop_native.status()
+        probe = self.desktop_native.probe() if desktop['running'] else {}
+        connected = bool(probe.get('ok') and probe.get('ready') and probe.get('nativeAvailable')
+                         and probe.get('desktopExecutable')
+                         and os.path.normcase(str(Path(probe['desktopExecutable']).resolve()))
+                         == os.path.normcase(str(Path(cfg['zcode_executable']).resolve())))
+        details = []
+        for sid, data in self.sessions.items():
+            row = {'session_id': sid, **copy.deepcopy(data)}
+            row['usable'] = data.get('transport') == 'desktop_native'
+            row['desktop'] = {'connection': 'desktop_native' if row['usable'] else 'legacy_history',
+                              'live_updates': row['usable'], 'gui_verified': False}
+            details.append(row)
+        return {'connected': connected, 'bridge_version': __version__, 'transport': 'desktop_native',
+                'independent_engine_enabled': False, 'engine_pid': None,
+                'desktop_running': desktop['running'], 'desktop_pid': desktop['pid'],
+                'desktop_error': error, 'native_transport': native,
+                'managed_sessions': list(self.sessions), 'managed_session_details': details,
+                'pending_count': len(self.pending), 'event_cursor': self.seq,
+                'notifications': self.notifications.aggregate()}
+
+    def _desktop_models(self, args):
+        cfg = config()
+        workspace = str(Path(args.get('workspace') or cfg['default_workspace']).expanduser().resolve())
+        if not Path(workspace).is_dir():
+            raise ValueError('工作区不存在')
+        model = cfg.get('default_model') or {}
+        model = model if model.get('providerId') and model.get('modelId') else None
+        effort = cfg.get('default_thought_level')
+        request = {'model': model}
+        if effort and effort != 'auto' and model:
+            request['thought_level'] = effort
+        result = self.desktop_native.model_catalog(workspace, 'read_only',
+                                                  'catalog_' + uuid.uuid4().hex, **request)
+        self.model_catalog = {(m['ref']['providerId'], m['ref']['modelId']): copy.deepcopy(m)
+                              for m in result.get('available', [])}
+        return {'available': result.get('available', []), 'current': result.get('selected'),
+                'lastUsed': result.get('selected'), 'transport': 'desktop_native'}
 
     def _remaining(self, deadline, cap=40):
         if deadline is None:
@@ -1700,53 +1751,22 @@ class Bridge:
         meta = context
         deadline = time.monotonic() + max(.5, float(budget_ms) / 1000.0) if budget_ms else None
         if name == 'zcode_status':
-            caps = self.rpc('runtime/capabilities', deadline=deadline)
-            return {'connected': True, 'bridge_version': __version__, 'engine_pid': self.client.child.pid,
-                    'desktop_running': desktop_running(config()['zcode_executable']),
-                    'capabilities': caps, 'pending_count': len(self.pending),
-                    'managed_sessions': list(self.sessions), 'managed_session_details':[
-                        {'session_id':sid,**copy.deepcopy(data),
-                         'desktop':session_visibility(sid, data.get('workspace'))} for sid,data in self.sessions.items()],
-                    'event_cursor': self.seq,
-                    'notifications': self.notifications.aggregate(),
-                    'native_transport': self.desktop_native.status()}
+            return self._desktop_status()
         if name == 'zcode_launch':
             return self.launch(force=True, workspace=args.get('workspace'), allow_focus=args.get('allow_focus',False))
         if name == 'zcode_settings':
             if args.get('changes') is not None:
                 if caller_mode(args) == 'plan':
                     raise ValueError('只读会话不能修改桥接配置')
-                return save_config(args['changes'])
-            return config()
+                saved = save_config(args['changes'])
+            else:
+                saved = config()
+            return {key: value for key, value in saved.items() if not key.startswith('desktop_sync_')}
         if name == 'zcode_models':
-            cfg = config()
-            path = Path(args.get('workspace') or cfg['default_workspace']).resolve()
-            if not path.is_dir():
-                raise ValueError('工作区不存在')
-            selection = copy.deepcopy(cfg['default_model'])
-            thought = cfg.get('default_thought_level')
-            if (isinstance(selection, dict) and selection.get('providerId')
-                    and selection.get('modelId') and isinstance(thought, str)
-                    and thought.strip() and thought != 'auto'):
-                # The probe must carry the configured effort; a ref-only
-                # selection is rejected by models that require reasoningLevel.
-                selection['options'] = {**(selection.get('options') or {}),
-                                        'reasoningLevel': thought}
-            snapshot = self.rpc('session/create', {
-                'workspace': {'workspacePath': str(path), 'workspaceKey': str(path)},
-                'mode': 'plan', 'persistence': 'deferred', 'titleGenerationEnabled': False,
-                **({'model':selection} if selection.get('providerId') and selection.get('modelId') else {})})
-            try:
-                self.model_catalog = {(m['ref']['providerId'],m['ref']['modelId']):copy.deepcopy(m)
-                    for m in snapshot['settings']['model']['available']}
-                return snapshot['settings']['model']
-            finally:
-                self.rpc('session/close', {'sessionId': snapshot['session']['sessionId'], 'expectedPersistence': 'deferred'})
+            return self._desktop_models(args)
         if name == 'zcode_create_session':
             mode, cfg = caller_mode(args), config()
-            transport = str(args.get('transport') or cfg.get('default_transport') or 'engine')
-            if transport not in ('engine', 'desktop_native'):
-                raise ValueError('transport_invalid: 只支持 engine 或 desktop_native')
+            transport = self._select_transport(args.get('transport') or cfg.get('default_transport'))
             path = Path(args['workspace']).resolve()
             if not path.is_dir():
                 raise ValueError('指定工作区不存在')
@@ -1782,11 +1802,13 @@ class Bridge:
                 snapshot = self.inherit(sid, args)
             return self.summary(snapshot)
         if name == 'zcode_sessions':
-            params = {'limit': min(100, max(1, int(args.get('limit', 30))))}
-            if args.get('workspace'):
-                path = str(Path(args['workspace']).resolve())
-                params['workspace'] = {'workspacePath': path, 'workspaceKey': path}
-            return self.rpc('session/list', params)
+            workspace = str(Path(args['workspace']).resolve()) if args.get('workspace') else None
+            rows = [{'sessionId': sid, **copy.deepcopy(data)} for sid, data in self.sessions.items()
+                    if data.get('transport') == 'desktop_native'
+                    and (not workspace or data.get('workspace') == workspace)]
+            limit = min(100, max(1, int(args.get('limit', 30))))
+            return {'sessions': rows[:limit], 'more': len(rows) > limit,
+                    'transport': 'desktop_native', 'scope': 'bridge_owned'}
         if name == 'zcode_pending':
             sid = args.get('session_id')
             if sid and self._is_native(sid):
@@ -2264,7 +2286,7 @@ class Bridge:
             profile_row = profiles.get(profile_name) if profile_name else {}
             if isinstance(profile_row, dict):
                 transport_hint = profile_row.get('transport')
-        transport_hint = str(transport_hint or cfg.get('default_transport') or 'engine')
+        transport_hint = self._select_transport(transport_hint or cfg.get('default_transport'))
         if transport_hint == 'desktop_native':
             # Host replay returns request metadata, not a cached catalog result.
             # Each new preflight is a fresh query; business replay returned above.

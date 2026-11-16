@@ -1,6 +1,6 @@
 {
   "name": "codex-to-zcode-bridge",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Local ZCode sessions, models, questions, permissions and dynamic workflows.",
   "author": {
     "name": "cateyemizuki"

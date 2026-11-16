@@ -19,6 +19,8 @@
       "Write",
       "Interactive"
     ],
-    "brandColor": "#72E2B5"
+    "brandColor": "#72E2B5",
+    "logo": "./assets/zcode.png",
+    "composerIcon": "./assets/zcode.png"
   }
 }

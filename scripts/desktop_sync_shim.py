@@ -29,13 +29,18 @@ import json
 import os
 import secrets
 import socket
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'runtime'))
+from zcode_bridge.workspace_policy import WorkspacePolicy, policy_config
+
 SHIM_SOURCE = ROOT / "runtime/desktop_sync/shim.mjs"
 NATIVE_SOURCE = ROOT / "runtime/desktop_sync/native_transport.mjs"
+POLICY_SOURCE = ROOT / "runtime/desktop_sync/workspace_policy.mjs"
 NATIVE_MARKER = "ZCODE_DESKTOP_NATIVE_TRANSPORT_V1"
 SHIM_MARKER = "ZCODE_DESKTOP_SYNC_SHIM_V1"
 TARGET = "out/host/index.js"
@@ -305,6 +310,7 @@ def make_plan(app_root: Path, manifest: dict | None = None) -> Plan:
     try:
         snippet = SHIM_SOURCE.read_text(encoding="utf-8")
         native = NATIVE_SOURCE.read_text(encoding="utf-8")
+        policy = POLICY_SOURCE.read_text(encoding="utf-8")
     except OSError as error:
         raise ShimError(f"shim source is missing: {error}") from error
     if SHIM_MARKER not in snippet:
@@ -314,9 +320,12 @@ def make_plan(app_root: Path, manifest: dict | None = None) -> Plan:
     if native.count(NATIVE_MARKER) != 1 or native.count("export function createZcodeDesktopNativeTransport(") != 1:
         raise ShimError("native transport source marker or factory is not unique")
     native = native.replace("export function createZcodeDesktopNativeTransport(", "function createZcodeDesktopNativeTransport(", 1)
+    if policy.count('export function createZcodeWorkspacePolicy(') != 1:
+        raise ShimError('workspace policy factory is not unique')
+    policy = policy.replace('export function createZcodeWorkspacePolicy(', 'function createZcodeWorkspacePolicy(', 1)
     patched_text = text.replace(ANCHOR_EXPOSE, REPLACEMENT_EXPOSE, 1)
     patched_text = patched_text.replace(ANCHOR_API, REPLACEMENT_API, 1)
-    combined = patched_text + "\n" + native + "\n" + snippet
+    combined = patched_text + "\n" + policy + "\n" + native + "\n" + snippet
     if combined.count(SHIM_MARKER) != 1:
         raise ShimError("patched output does not contain exactly one shim marker")
     patched = combined.encode("utf-8")
@@ -483,15 +492,19 @@ def canonical_workspace(value: str) -> str:
     return str(path)
 
 
-def configure(state_dir: Path, workspaces: list[str], port: int = 0) -> dict:
+def configure(state_dir: Path, workspaces: list[str] | None = None, port: int = 0,
+              policy_mode: str = 'blacklist', blocked_paths: list[str] | None = None) -> dict:
     state_dir = state_dir.expanduser().resolve()
     resolved = []
-    for workspace in workspaces:
+    for workspace in workspaces or []:
         path = canonical_workspace(workspace)
         if path not in resolved:
             resolved.append(path)
-    if not resolved:
-        raise ShimError("at least one allowed workspace is required")
+    policy = policy_config(policy_mode, blocked_paths)
+    try:
+        WorkspacePolicy({'workspacePolicy': policy, 'allowedWorkspaces': resolved})
+    except (ValueError, OSError) as error:
+        raise ShimError(str(error)) from error
     if port < 0 or port > 65535:
         raise ShimError("port must be between 0 and 65535")
     state_dir.mkdir(parents=True, exist_ok=True)
@@ -501,6 +514,7 @@ def configure(state_dir: Path, workspaces: list[str], port: int = 0) -> dict:
         "token": secrets.token_urlsafe(32),
         "discoveryPath": str(state_dir / "host-discovery.json"),
         "allowedWorkspaces": resolved,
+        "workspacePolicy": policy,
         "nativeTransport": {"enabled": False, "ownershipPath": str(state_dir / "native-ownership.json")},
     }
     destination = state_dir / "control.json"
@@ -514,6 +528,7 @@ def configure(state_dir: Path, workspaces: list[str], port: int = 0) -> dict:
         "ok": True,
         "config": str(destination),
         "allowedWorkspaces": resolved,
+        "workspacePolicy": policy,
         "port": port,
         "warning": "Set ZCODE_DESKTOP_SYNC_CONFIG to this file in the patched host process.",
     }
@@ -538,6 +553,22 @@ def configure_native(config_path: Path, enabled: bool) -> dict:
     config["nativeTransport"] = {"enabled": enabled, "ownershipPath": ownership or str(config_path.parent / "native-ownership.json")}
     _atomic_write(config_path, (json.dumps(config, indent=2) + "\n").encode("utf-8"))
     return {"ok": True, "nativeEnabled": enabled, "config": str(config_path), "processStarted": False}
+
+
+def configure_workspace_policy(config_path: Path, mode='blacklist', blocked_paths=None, workspaces=None) -> dict:
+    """Explicitly migrate rules, preserving credentials, ownership and endpoint."""
+    config_path = config_path.expanduser().resolve()
+    config = _read_control_config(config_path)
+    if workspaces is not None:
+        config['allowedWorkspaces'] = [canonical_workspace(value) for value in workspaces]
+    config['workspacePolicy'] = policy_config(mode, blocked_paths)
+    try:
+        WorkspacePolicy(config)
+    except (ValueError, OSError) as error:
+        raise ShimError(str(error)) from error
+    _atomic_write(config_path, (json.dumps(config, indent=2) + '\n').encode('utf-8'))
+    return {'ok': True, 'config': str(config_path), 'workspacePolicy': config['workspacePolicy'],
+            'processStarted': False}
 
 
 def control_call(config_path: Path, message: dict, timeout: float = 30.0) -> dict:
@@ -607,8 +638,16 @@ def main(argv: list[str] | None = None) -> int:
     commands.add_parser("status", help="compare the current file with the recorded state")
 
     configure_parser = commands.add_parser("configure", help="write a private control config")
-    configure_parser.add_argument("--workspace", action="append", required=True)
+    configure_parser.add_argument("--workspace", action="append", default=[])
     configure_parser.add_argument("--port", type=int, default=0)
+    configure_parser.add_argument('--policy-mode', choices=('blacklist', 'allowlist'), default='blacklist')
+    configure_parser.add_argument('--blocked-path', action='append', default=None)
+
+    policy_parser = commands.add_parser('workspace-policy', help='update only workspace rules in an existing control')
+    policy_parser.add_argument('--config', type=Path, required=True)
+    policy_parser.add_argument('--mode', choices=('blacklist', 'allowlist'), default='blacklist')
+    policy_parser.add_argument('--blocked-path', action='append', default=None)
+    policy_parser.add_argument('--workspace', action='append', default=None)
 
     native_config_parser = commands.add_parser("native-config", help="enable/disable the private native transport opt-in")
     native_config_parser.add_argument("--config", type=Path, required=True)
@@ -643,7 +682,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "status":
             _print(status(args.state_dir))
         elif args.command == "configure":
-            _print(configure(args.state_dir, args.workspace, args.port))
+            _print(configure(args.state_dir, args.workspace, args.port, args.policy_mode, args.blocked_path))
+        elif args.command == 'workspace-policy':
+            _print(configure_workspace_policy(args.config, args.mode, args.blocked_path, args.workspace))
         elif args.command == "native-config":
             _print(configure_native(args.config, args.mode == "enabled"))
         elif args.command == "native-call":

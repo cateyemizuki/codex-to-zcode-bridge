@@ -94,7 +94,7 @@
 前置步骤（可选，必需时才做）：
 
 1. 用 `scripts/desktop_sync_copy.py prepare` 复制并打补丁到隔离副本；版本、host/engine SHA-256、锚点数量任一不符即拒绝。补丁工具不在默认安装包内，需从仓库取得。
-2. 用 `scripts/desktop_sync_shim.py configure --workspace <允许的工作区> --port 0` 生成私有 `control.json`；allowedWorkspaces 必须显式列出。
+2. 用 `scripts/desktop_sync_shim.py configure --port 0` 生成私有 `control.json`；默认黑名单只屏蔽 C 盘及其子路径。旧规则迁移及显式白名单见 [工作区规则](WORKSPACE_POLICY.md)。
 3. 在插件设置中开启 `desktop_sync_enabled` 并把 `desktop_sync_control_file` 指向该私有文件。
 4. 正常派发/跟进/终态后，适配器异步按 workspace 合并请求；最多 50 个 session；配置/token/endpoint 失败只记录状态，不影响业务。
 

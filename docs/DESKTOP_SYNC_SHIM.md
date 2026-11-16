@@ -107,18 +107,18 @@ python scripts/desktop_sync_copy.py bootstrap --destination <copy>
   "port": 0,
   "token": "<随机 token>",
   "discoveryPath": "<state>/host-discovery.json",
-  "allowedWorkspaces": ["<显式允许的工作区绝对路径>"]
+  "workspacePolicy": {"mode": "blacklist"}
 }
 ```
 
 - host 进程从环境变量 `ZCODE_DESKTOP_SYNC_CONFIG` 读取该文件；
 - 监听端口写在私有 discovery 文件中，不进入仓库；
 - 每个连接第一行必须提交 token，长度不足 16 的直接拒绝；
-- `sync` 只接受 `allowedWorkspaces` 中的路径（Windows 下按解析后的路径比较），
+- `sync` 按 `workspacePolicy` 检查工作区（新配置默认只屏蔽 C 盘及其子路径），
   事务最多 50 个 session id；
-- CLI 与 shim 都会先把请求路径解析成白名单中的配置路径，再转发给 host；
+- 客户端与 shim 都会先规范化并校验请求路径，再转发给 host；
   正斜杠、反斜杠、尾部斜杠或大小写差异不会产生第二个 workspace key；
-- 没有通配符、递归扫描或“任意工作区”模式；
+- 黑名单按目录边界匹配子路径，不递归扫描目录；旧配置迁移及显式白名单见 [工作区规则](WORKSPACE_POLICY.md)；
 - `sync` 面向 host 已经初始化/打开过的工作区；冷工作区如果还没有 engine
   运行时，reconcile 会失败并在响应里返回可观测错误，而不是伪造成功。
 
@@ -255,7 +255,7 @@ python scripts/desktop_sync_probe.py --control <private>/control.json --op sync 
   --workspace <allowed-workspace> --session-id <session-id> --confirm-sync
 ```
 
-`--op sync` 必须显式 `--confirm-sync`；一次最多 50 个 session，workspace 必须是 `allowedWorkspaces` 中的规范化路径。
+`--op sync` 必须显式 `--confirm-sync`；一次最多 50 个 session，workspace 必须通过配置的工作区准入规则。
 
 GUI 验收步骤与预期：
 

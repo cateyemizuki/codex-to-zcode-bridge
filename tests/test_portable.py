@@ -94,7 +94,7 @@ class PortableTests(unittest.TestCase):
             cwd=base,env=env,capture_output=True,text=True,encoding='utf-8',timeout=20)
         self.assertEqual(process.returncode,0,process.stderr)
         replies={r['id']:r for r in map(json.loads,process.stdout.splitlines())}
-        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.5.2')
+        self.assertEqual(replies[1]['result']['serverInfo']['version'],'0.5.3')
         self.assertEqual(len(replies[2]['result']['tools']),34)
         self.assertIn('默认主代理模型',replies[3]['result']['contents'][0]['text'])
         self.assertFalse((state/'connection.json').exists(),'MCP discovery must not start an engine')

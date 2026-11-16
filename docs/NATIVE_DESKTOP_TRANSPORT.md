@@ -24,9 +24,10 @@ python scripts/desktop_sync_shim.py native-call --config <private-control.json> 
 python scripts/desktop_sync_shim.py native-config --config <private-control.json> --mode disabled
 ```
 
-The running shim rereads only this opt-in field on native requests, so disabling it does
-not restart or stop a task. The patched host must include this transport version. The
-workspace must exactly match the existing configured workspace allowlist. Use a separate
+The running shim rereads the native opt-in and workspace rules on requests, so changing
+them does not restart or stop a task. The patched host must include this transport version.
+New controls default to a C-drive subtree blacklist; legacy controls retain their exact
+allowlist until explicitly migrated. See [workspace policy](WORKSPACE_POLICY.md). Use a separate
 private config and ownership file for each Desktop instance. Never include these files
 or request files in releases; they can contain local IDs and prompt text.
 

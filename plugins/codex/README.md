@@ -2,6 +2,8 @@
 
 本机 stdio MCP 插件，提供 32 项控制工具、2 项原生设置工具（共 34 项），以及内嵌配置面板。GPT 侧没有 skill，也不需要复制 ZCode 的完整工作流说明。推荐用 `zcode_delegate` 一次创建/派发/可选订阅，再用 `zcode_agent_message/inspect/answer/cancel` 跟进；旧 28 项工具保持兼容。
 
+0.5.3 的 Desktop 控制配置默认使用工作区黑名单，只禁用 C 盘及其子路径；已有白名单可显式迁移。规则和升级边界见 [工作区规则](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/WORKSPACE_POLICY.md)。
+
 ## 手动安装
 
 需要本机 Python 3.10+、Node、已配置模型的 ZCode，以及 `codex` CLI。下载本侧 Release ZIP 并解压，在目录中运行：
@@ -88,7 +90,7 @@ python install.py
 不使用安装器时，先准备本机 Python 服务，再使用标准 Codex 插件命令：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.2#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.3#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```

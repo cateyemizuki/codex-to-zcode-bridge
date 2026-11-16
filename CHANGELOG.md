@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3 — 2026-11-16
+
+- Desktop native/sync 新控制配置默认采用黑名单，只禁用 C 盘及其子路径；其他现存工作区不再逐项登记。旧白名单保留兼容，新增显式迁移命令，迁移保留认证和 ownership。
+- Python 客户端与 Desktop shim 统一校验目录边界、大小写、路径规范化及真实路径；规则每次请求重新读取，损坏或无效规则拒绝访问。
+- 新增默认规则、旧配置迁移、实时规则更新、junction 解析和分发审计回归；工作区准入与文件隔离的适用范围见 `docs/WORKSPACE_POLICY.md`。
+
 ## 0.5.1 — 2026-11-15
 
 - 修复技术权限被误判为认证问题：`zcode_agent_answer` 不再对整个请求参数序列化后做凭证子串扫描。`interaction/requestPermission` 按真实技术权限处理；用户问题只检查实际题面、header、选项文案与题面自身的 sensitive 标志，工作流脚本、路径、变量名和日志里的 `token`/`password` 等文本不再阻断 `allow_once`。真正的 password/API token/OAuth 问题仍需用户本人回答，未知用户问题结构仍保守拒绝。

@@ -69,7 +69,7 @@ python scripts/desktop_native_install.py rollback [--target <installed-zcode>] [
 或先回滚拥有该状态的安装。
 
 `prepare --dry-run` 只做检查与计划输出，不创建 staging、不写 ledger、不改目标。
-`prepare` 至少需要一个 `--workspace`，按解析后的绝对路径精确 allowlist。
+`prepare` 不再要求逐项提供 `--workspace`；新控制配置默认只将 C 盘及其子路径列入黑名单。保留的 `--workspace` 参数记录路径，精确白名单需显式选择，见 [工作区规则](WORKSPACE_POLICY.md)。
 
 ## 4. 改动的文件、备份与切换
 
@@ -95,7 +95,7 @@ apply 前先按**可执行文件路径**确认没有进程从目标 `ZCode.exe` 
 
 engine 不在本次改动内，apply 前后都复核其 SHA-256 仍等于原件。
 
-## 5. 控制文件、workspace allowlist 与 token
+## 5. 控制文件、工作区规则与 token
 
 `prepare` 用 `desktop_sync_shim.configure` 在私有 state 生成 control 文件，再用
 `configure_native` 启用 native transport。control 内含随机 token，token 只由 host
@@ -103,7 +103,8 @@ engine 不在本次改动内，apply 前后都复核其 SHA-256 仍等于原件�
 
 - 不出现在 CLI 输出、错误信息、ledger、pointer 或 bootstrap；
 - 只写私有 control（权限尽量收窄到当前用户）；
-- `allowedWorkspaces` 是显式、精确匹配的 allowlist，不做前缀或通配放行。
+- 新配置的 `workspacePolicy.mode` 默认 `blacklist`，`blockedPaths` 默认只含 C 盘根；路径及子目录都被拒绝，其他现存工作区通过准入。
+- 旧配置没有 `workspacePolicy` 且含 `allowedWorkspaces` 时保留精确白名单；显式迁移不会重建 token 或 ownership，见 [工作区规则](WORKSPACE_POLICY.md)。
 
 本机绝对路径只写入私有 ledger/control、生成的 pointer 与已安装 bootstrap；公共
 源码、测试与本文档不含任何本机路径。

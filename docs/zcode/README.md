@@ -2,6 +2,8 @@
 
 ZCode 插件，提供桥接管理用的原生 skill、`bridge-settings` 命令和同一套 34 项 MCP 工具（32 项控制工具 + 2 项原生设置工具）。两侧共用本机控制服务和配置。高层入口推荐 `zcode_delegate` + `zcode_agent_message/inspect/answer/cancel`；旧 28 项工具保持兼容。
 
+0.5.3 的 Desktop 控制配置默认使用工作区黑名单，只禁用 C 盘及其子路径；已有白名单可显式迁移。规则和升级边界见 [工作区规则](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/WORKSPACE_POLICY.md)。
+
 0.5.2 支持从完整仓库显式接入兼容的原版 Desktop，保留正常登录与 profile；默认安装器不修改应用。原生新会话按工作区复用唯一活动本机项目，无匹配时明确位于未归属“任务”分组，不自动展开用户分组。安装与回滚见 [原版说明](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md)。
 
 ## 手动安装

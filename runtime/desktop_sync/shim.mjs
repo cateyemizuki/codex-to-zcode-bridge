@@ -39,10 +39,10 @@ import * as __zcodeSyncCrypto from 'node:crypto';
   const port = Number.isInteger(config.port) ? config.port : 0;
   const discoveryPath = typeof config.discoveryPath === 'string' ? config.discoveryPath : '';
   const caseInsensitivePaths = process.platform === 'win32';
-  const allowedWorkspaces = (Array.isArray(config.allowedWorkspaces) ? config.allowedWorkspaces : [])
-    .filter((value) => typeof value === 'string' && value.trim())
-    .map((value) => path.resolve(value));
-  if (allowedWorkspaces.length === 0) return;
+  const readPolicy = () => createZcodeWorkspacePolicy({
+    fs, path, config: JSON.parse(fs.readFileSync(configPath, 'utf8')),
+  });
+  try { readPolicy(); } catch { return; }
 
   const events = [];
   const subscribed = new Set();
@@ -53,13 +53,10 @@ import * as __zcodeSyncCrypto from 'node:crypto';
     const resolved = path.resolve(value);
     return caseInsensitivePaths ? resolved.toLowerCase() : resolved;
   };
-  // Resolve the request to the exact configured path before forwarding it to
-  // the host. This keeps validation and the host's workspace key identical
-  // when callers use forward slashes, trailing separators or different case.
-  const allowedByKey = new Map(allowedWorkspaces.map((value) => [normalize(value), value]));
+  // Re-read rules for every operation; invalid or unreadable rules deny access.
   const resolveAllowed = (value) => {
-    if (typeof value !== 'string') return null;
-    return allowedByKey.get(normalize(value)) || null;
+    try { return readPolicy().resolve(value); }
+    catch { return null; }
   };
   const syncer = () => globalThis.__zcodeDesktopSync || null;
   let nativeTransport;
@@ -166,11 +163,15 @@ import * as __zcodeSyncCrypto from 'node:crypto';
   }
 
   function probe() {
+    let policy;
+    try { policy = readPolicy(); } catch { return { ok: false, error: 'workspace_policy_invalid' }; }
     return {
       ok: true,
       ready: Boolean(syncer()),
       pid: process.pid,
-      allowedWorkspaceCount: allowedWorkspaces.length,
+      allowedWorkspaceCount: policy.mode === 'allowlist' ? policy.pathCount : 0,
+      workspacePolicyMode: policy.mode,
+      blockedPathCount: policy.mode === 'blacklist' ? policy.pathCount : 0,
       subscribedWorkspaceCount: subscribed.size,
       nativeAvailable: typeof globalThis.__zcodeDesktopNativeCreate === 'function',
       events: events.slice(-50),

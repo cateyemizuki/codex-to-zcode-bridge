@@ -2,7 +2,7 @@
 
 让 ChatGPT / Codex 和其他支持本机 MCP 的 agent 工具调用本机 ZCode：选择已有模型、在指定工作区创建会话、派发任务、读取主代理和子代理结果、处理问题与授权，并使用 ZCode 的原生动态工作流。任务完成后，桥接可以持久记录完成事件，并在版本支持的 Codex Desktop 上尝试唤醒原 chat 继续验收。
 
-本仓库提供两个独立安装包，版本 **0.5.2**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。本版增加原版 Desktop 的显式可回滚接入、按工作区匹配已有项目，并修复通知环境转发和可恢复工作流状态；见 [本版说明](docs/RUNTIME_FIX_052.md)。旧版记录保留在 [RUNTIME_FIX_051.md](docs/RUNTIME_FIX_051.md)。
+本仓库提供两个独立安装包，版本 **0.5.3**。它们共享同一份运行时代码和本机控制服务，共提供 34 项 MCP 工具（32 项控制 + 2 项原生设置）。本版将新 Desktop 控制配置默认改为工作区黑名单，只禁用 C 盘及其子路径；旧配置可显式迁移，见 [工作区规则](docs/WORKSPACE_POLICY.md)。原版接入与通知修复记录保留在 [0.5.2 说明](docs/RUNTIME_FIX_052.md)。
 
 | 安装包 | 用途 | 说明 |
 | --- | --- | --- |
@@ -58,7 +58,7 @@
 本机已有 Python、Node 和 ZCode 时，先安装 MCP 服务的 Python 包，再用 Codex 命令注册市场和安装插件：
 
 ```powershell
-python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.2#subdirectory=plugins/codex"
+python -m pip install "git+https://github.com/cateyemizuki/codex-to-zcode-bridge.git@v0.5.3#subdirectory=plugins/codex"
 codex plugin marketplace add cateyemizuki/codex-to-zcode-bridge
 codex plugin add codex-to-zcode-bridge@codex-to-zcode-bridge-plugins
 ```
@@ -85,7 +85,7 @@ python install.py --target both --zcode-executable "<ZCode 可执行文件的绝
 
 ### 从 ZIP 安装
 
-在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.2.zip` 或 `codex-to-zcode-bridge-zcode-0.5.2.zip`，解压后进入该目录，运行：
+在 Releases 下载 `codex-to-zcode-bridge-codex-0.5.3.zip` 或 `codex-to-zcode-bridge-zcode-0.5.3.zip`，解压后进入该目录，运行：
 
 ```powershell
 python install.py
@@ -150,7 +150,7 @@ python install.py --target both --no-register
 
 ## 可选 Desktop 同步适配器
 
-0.5.0 提供一个默认关闭的客户端适配器，把创建、输入和终态事件异步合并后，按 workspace 节流调用已配置的私有 Desktop shim。它只读私有 `control.json`，只接受 `allowedWorkspaces` 中的路径，最多 50 个 session；配置/token/endpoint 不可用时只记录状态，不阻断派发。token 不进入工具响应、提示词、日志或仓库；适配器不打开项目、不抢焦点、不重启实例。
+客户端适配器默认关闭，把创建、输入和终态事件异步合并后，按 workspace 节流调用已配置的私有 Desktop shim。它只读私有 `control.json`，按其中的工作区规则准入，最多 50 个 session；新配置默认黑名单，只禁用 C 盘及其子路径。旧 `allowedWorkspaces` 配置保留精确白名单行为，迁移方式见 [工作区规则](docs/WORKSPACE_POLICY.md)。配置/token/endpoint 不可用时只记录状态，不阻断派发。token 不进入工具响应、提示词、日志或仓库；适配器不打开项目、不抢焦点、不重启实例。
 
 配置项：`desktop_sync_enabled`、`desktop_sync_control_file`、`desktop_sync_min_interval_seconds`，以及诊断用的 `superagent_stall_seconds`、`superagent_read_failure_threshold`。原生设置和内嵌面板都可编辑。
 

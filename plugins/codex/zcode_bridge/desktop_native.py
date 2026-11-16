@@ -8,8 +8,8 @@ owned by the patched Desktop's own engine.
 Safety boundaries:
 
 * disabled unless the local settings enable it and name a private control file;
-* only the loopback ``native_*`` operations below, only for workspaces in the
-  control file's ``allowedWorkspaces``;
+* only the loopback ``native_*`` operations below, only for workspaces admitted
+  by the control file's blacklist or legacy exact allowlist;
 * a missing/disabled host, stale owner or unsupported operation is an explicit
   error; it never falls back to the independent engine, opens or focuses a
   project, restarts an instance, or cold-resumes a foreign session;
@@ -100,11 +100,11 @@ class DesktopNativeAdapter:
 
     def _workspace(self, control, workspace):
         try:
-            key, resolved = self._sync._normalize(workspace)
+            resolved = control['policy'].resolve(str(Path(workspace).expanduser().absolute()))
         except (OSError, TypeError, ValueError) as error:
             raise DesktopNativeError('workspace_not_allowed', 'workspace is invalid') from error
-        if key not in control['allowed'] or not Path(resolved).is_dir():
-            raise DesktopNativeError('workspace_not_allowed', 'workspace is not in the allowlist')
+        if not resolved or not Path(resolved).is_dir():
+            raise DesktopNativeError('workspace_not_allowed', 'workspace is denied by the configured workspace policy')
         return resolved
 
     def _remember(self, op, state, session_id=''):

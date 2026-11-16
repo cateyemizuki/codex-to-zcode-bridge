@@ -10,7 +10,9 @@ FORBIDDEN_NAMES = {'connection.json','sessions.json','installation.json','verifi
     'provider_config.json','config.json','.env','credentials.json','auth.json',
     'notifications.json','subscriptions.json','inbox.json','outbox.json','host_capability.json'}
 PATTERNS = {
-    'absolute Windows path': re.compile(r'(?<![A-Za-z0-9])[A-Za-z]:[\\/](?:[^\s\"\'<>]+)'),
+    # Bare drive roots are portable access-policy constants. Any path component
+    # after the root remains forbidden in public sources and archives.
+    'absolute Windows path': re.compile(r'(?<![A-Za-z0-9])[A-Za-z]:[\\/]+(?=[^\\/\s\"\'<>`])(?:[^\s\"\'<>`]+)'),
     'private provider ID': re.compile(r'new-provider-\d+'),
     'GitHub token': re.compile(r'\bgh[pousr]_[A-Za-z0-9_]{20,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b'),
     'API key': re.compile(r'\bsk-[A-Za-z0-9_-]{20,}\b'),

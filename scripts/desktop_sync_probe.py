@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from desktop_sync_shim import ShimError, control_call
+from zcode_bridge.workspace_policy import WorkspacePolicy
 
 
 def _json(value):
@@ -37,22 +38,14 @@ def _load_control(path):
     host = str(raw.get('host') or '127.0.0.1')
     if host != '127.0.0.1':
         return None, 'host_not_allowed'
-    allowed = raw.get('allowedWorkspaces')
-    if not isinstance(allowed, list) or not allowed:
-        return None, 'allowlist_missing'
-    resolved = []
-    for value in allowed:
-        if isinstance(value, str) and value.strip():
-            try:
-                resolved.append(Path(value).expanduser().resolve())
-            except OSError:
-                continue
-    if not resolved:
-        return None, 'allowlist_missing'
+    try:
+        policy = WorkspacePolicy(raw)
+    except (ValueError, OSError) as error:
+        return None, str(error) if isinstance(error, ValueError) else 'workspace_policy_invalid'
     port = raw.get('port')
     discovery = raw.get('discoveryPath')
     return {
-        'allowed': resolved,
+        'policy': policy,
         'port': port if type(port) is int else 0,
         'discovery': str(discovery or ''),
     }, ''
@@ -66,7 +59,9 @@ def _status(control_path):
         'ok': True,
         'op': 'status',
         'state': 'configured',
-        'allowed_workspace_count': len(control['allowed']),
+        'workspace_policy_mode': control['policy'].mode,
+        'allowed_workspace_count': len(control['policy'].allowed),
+        'blocked_path_count': len(control['policy'].paths) if control['policy'].mode == 'blacklist' else 0,
         'port_configured': bool(control['port']),
         'discovery_configured': bool(control['discovery']),
         'token_present': True,
@@ -88,6 +83,8 @@ def _probe(control_path, timeout):
         'state': 'ready' if response.get('ready') else 'not_ready',
         'ready': bool(response.get('ready')),
         'allowed_workspace_count': response.get('allowedWorkspaceCount'),
+        'workspace_policy_mode': response.get('workspacePolicyMode'),
+        'blocked_path_count': response.get('blockedPathCount'),
         'subscribed_workspace_count': response.get('subscribedWorkspaceCount'),
         'event_count': len(events),
         'last_event': ({'reason': last.get('reason'), 'status': last.get('status'),
@@ -100,12 +97,10 @@ def _sync(control_path, workspace, session_ids, timeout):
     if control is None:
         return {'ok': False, 'op': 'sync', 'state': reason}
     try:
-        resolved = Path(workspace).expanduser().resolve()
-    except OSError:
+        resolved = control['policy'].resolve(str(Path(workspace).expanduser().absolute()))
+    except (OSError, ValueError):
         return {'ok': False, 'op': 'sync', 'state': 'workspace_invalid'}
-    allowed = {os.path.normcase(str(value)): value for value in control['allowed']}
-    key = os.path.normcase(str(resolved))
-    if key not in allowed:
+    if not resolved or not Path(resolved).is_dir():
         return {'ok': False, 'op': 'sync', 'state': 'workspace_not_allowed'}
     ids = [str(value) for value in session_ids if str(value)]
     truncated = len(ids) > 50
@@ -114,7 +109,7 @@ def _sync(control_path, workspace, session_ids, timeout):
         return {'ok': False, 'op': 'sync', 'state': 'session_required'}
     try:
         response = control_call(Path(control_path), {
-            'op': 'sync', 'workspace': str(allowed[key]),
+            'op': 'sync', 'workspace': resolved,
             'sessionIds': ids}, timeout=timeout)
     except ShimError as error:
         return {'ok': False, 'op': 'sync', 'state': 'unavailable',

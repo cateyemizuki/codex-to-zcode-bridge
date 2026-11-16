@@ -4,8 +4,8 @@ The adapter is deliberately small and defensive:
 
 * it is disabled unless the local settings enable it and name a private control
   file; nothing is read from the repository or from a default author path;
-* it only calls the loopback ``sync`` operation, only for workspaces present in
-  the control file's ``allowedWorkspaces``, with at most 50 session ids;
+* it only calls the loopback ``sync`` operation for workspaces admitted by the
+  control file's blacklist or legacy exact allowlist, with at most 50 session ids;
 * requests are merged per workspace and throttled by a configurable interval;
 * a missing config, token, host or endpoint is recorded as a status code and
   never raises into delegate/send;
@@ -22,6 +22,7 @@ import socket
 import threading
 import time
 from pathlib import Path
+from .workspace_policy import WorkspacePolicy
 
 MAX_SESSIONS = 50
 DEFAULT_INTERVAL = 5
@@ -100,20 +101,10 @@ class DesktopSyncAdapter:
         host = str(raw.get('host') or '127.0.0.1')
         if host != '127.0.0.1':
             raise DesktopSyncError('host_not_allowed')
-        allowed = raw.get('allowedWorkspaces')
-        if not isinstance(allowed, list) or not allowed:
-            raise DesktopSyncError('allowlist_missing')
-        mapping = {}
-        for value in allowed:
-            if not isinstance(value, str) or not value.strip():
-                continue
-            try:
-                key, resolved = self._normalize(value)
-            except OSError:
-                continue
-            mapping[key] = resolved
-        if not mapping:
-            raise DesktopSyncError('allowlist_missing')
+        try:
+            policy = WorkspacePolicy(raw)
+        except (ValueError, OSError) as error:
+            raise DesktopSyncError(str(error) if isinstance(error, ValueError) else 'workspace_policy_invalid') from error
         port = raw.get('port')
         native = raw.get('nativeTransport')
         return {
@@ -121,7 +112,8 @@ class DesktopSyncAdapter:
             'host': host,
             'port': port if type(port) is int else 0,
             'discoveryPath': str(raw.get('discoveryPath') or ''),
-            'allowed': mapping,
+            'allowed': policy.allowed,
+            'policy': policy,
             'native': copy.deepcopy(native) if isinstance(native, dict) else {},
         }
 
@@ -142,11 +134,12 @@ class DesktopSyncAdapter:
             self._set_state(error.code, error.code)
             return {'accepted': False, 'state': error.code}
         try:
-            key, resolved = self._normalize(workspace)
+            resolved = control['policy'].resolve(str(Path(workspace).expanduser().absolute()))
+            key = os.path.normcase(resolved) if resolved else ''
         except (OSError, TypeError, ValueError):
             self._set_state('workspace_not_allowed', 'workspace_invalid')
             return {'accepted': False, 'state': 'workspace_not_allowed'}
-        if key not in control['allowed'] or not Path(resolved).is_dir():
+        if not resolved or not Path(resolved).is_dir():
             self._set_state('workspace_not_allowed', 'workspace_not_allowed')
             return {'accepted': False, 'state': 'workspace_not_allowed'}
         sessions = [str(value) for value in (session_ids or ())

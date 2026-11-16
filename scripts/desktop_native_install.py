@@ -488,8 +488,6 @@ def prepare(
 ) -> dict:
     target = target.expanduser().resolve()
     state_dir = state_dir.expanduser().resolve()
-    if not workspaces:
-        raise NativeInstallError("at least one explicit --workspace is required")
     report = preflight(target, state_dir)
 
     staging = target / STAGING_DIRNAME

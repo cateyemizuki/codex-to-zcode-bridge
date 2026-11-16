@@ -28,6 +28,7 @@ def build(destination):
         shutil.copy2(ROOT/'runtime/bridge.py', target/'bridge.py')
         shutil.copy2(ROOT/'scripts/installer.py', target/'install.py')
         shutil.copy2(ROOT/'LICENSE', target/'LICENSE')
+        shutil.copytree(ROOT/'runtime/assets', target/'assets', dirs_exist_ok=True)
         for name in ('README.md','AGENTS.md'):
             shutil.copy2(ROOT/'docs'/host/name, target/name)
         write(target/'_host.json', {'host':host, 'version':VERSION})
@@ -41,7 +42,8 @@ def build(destination):
                 'interface':{'displayName':'Codex to ZCode Bridge','shortDescription':'本机 ZCode 会话、模型与动态工作流',
                     'longDescription':'纯 MCP 桌面插件，提供原生设置和内嵌配置面板，不依赖 GPT 侧 skill。',
                     'developerName':'cateyemizuki','category':'Developer Tools',
-                    'capabilities':['Read','Write','Interactive'],'brandColor':'#72E2B5'}})
+                    'capabilities':['Read','Write','Interactive'],'brandColor':'#72E2B5',
+                    'logo':'./assets/zcode.png','composerIcon':'./assets/zcode.png'}})
         else:
             write(target/'.zcode-plugin/plugin.json', {**identity, 'mcpServers':'./.mcp.json',
                 'skills':'./skills', 'commands':'./commands'})

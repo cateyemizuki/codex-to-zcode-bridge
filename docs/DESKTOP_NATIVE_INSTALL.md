@@ -33,9 +33,10 @@ host 中 `ANCHOR_EXPOSE`、`ANCHOR_API` 各出现恰好一次；resources 与安
 
 - 原版（本文件）：沿用用户正常 profile（见第 7 节），只把 `resources/app.asar`
   换成展开目录，并加载本版本的固定补丁。
-- 副本（`scripts/desktop_sync_copy.py`）：仍只处理完整复制件，并继续拒绝目标根
-  仍含 `resources/app.asar` 的目录。本入口不复用副本的 ownedSID/runtime/generation，
-  使用独立的 control/discovery/ownership 状态；旧 SID 不迁入新 Host ownership。
+- 旧副本实验源码只保留为历史材料，不随插件 ZIP 发布，也不是运行回退路径。
+  正常会话只使用唯一正式 Desktop 主进程。本入口不复用旧副本的
+  ownedSID/runtime/generation，使用独立的 control/discovery/ownership 状态；
+  旧 SID 不迁入新 Host ownership。
 
 ## 3. 命令
 
@@ -54,6 +55,10 @@ python scripts/desktop_native_install.py apply --target <installed-zcode> [--dry
 
 # 对账 ledger 与当前文件
 python scripts/desktop_native_install.py status [--target <installed-zcode>]
+
+# 已接入安装的安全更新：运行中允许只读预检，实际替换要求先退出 ZCode
+python scripts/desktop_native_install.py update-host --target <installed-zcode> --dry-run
+python scripts/desktop_native_install.py update-host --target <installed-zcode>
 
 # 恢复到记录的原件；拒绝覆盖安装后被改过的内容
 python scripts/desktop_native_install.py rollback [--target <installed-zcode>] [--dry-run]
@@ -235,9 +240,19 @@ workspace。它不写数据库、不创建或改名项目、不改任何既有�
 尝试；缺事实时不重试、不轮询、不抢焦点、不自动展开分组。通知失败只会变成
 结果里的诊断字段，不会把已经 accepted 的 send 变成失败；项目解析失败在创建前拒绝。
 
-**先部署后生效**：resolver 与通知代码在 `make_plan` 时被内联进
-`out/host/index.js`。只改仓库源码不影响已经 apply 的实例，必须由本安装工具重新
-prepare/apply（已有补丁标记时先 rollback）后才会加载。
+**先部署后生效**：resolver、完整原生交互与工作流授权策略在 `make_plan` 时被内联进
+`out/host/index.js`。只改仓库源码不影响正在运行的实例。已由本安装器接入且整树与
+ledger 一致时，可用 `update-host --dry-run` 检查计划；完成当前任务并完全退出 ZCode
+后，执行 `update-host`，再手动打开 ZCode。更新器从记录的原始 ASAR 重建固定补丁，
+先检查语法及原件哈希，再备份并替换 Host、更新整树摘要。它不结束或启动进程，不改
+profile、token、ownership、原始 ASAR、EXE 或 engine；写入失败会补偿 Host 与 ledger。
+无法证明归属或字节被外部修改时拒绝更新，不提供强制覆盖。
+
+更新后 `workflowAuthorization.mode` 默认 `automatic`，由 ZCode Host 自行选择实际工作流
+请求中的会话授权，即使 Codex 未连接或外部 native API 已禁用仍工作。可在桥接设置中
+改为 `manual`；规划只读模式及其他提问不自动处理。实际生效需重新加载 Host，更新器
+返回 `activation=not_verified`，须从新运行的探针确认。旧安装不能通过安全更新检查时，
+仍走受校验的 rollback、prepare、apply 流程。
 
 ## 11. 已验证与待验证的验收
 

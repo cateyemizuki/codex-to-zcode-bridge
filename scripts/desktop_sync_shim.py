@@ -35,12 +35,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / 'runtime'))
 from zcode_bridge.workspace_policy import WorkspacePolicy, policy_config
 
 SHIM_SOURCE = ROOT / "runtime/desktop_sync/shim.mjs"
 NATIVE_SOURCE = ROOT / "runtime/desktop_sync/native_transport.mjs"
 POLICY_SOURCE = ROOT / "runtime/desktop_sync/workspace_policy.mjs"
+WORKFLOW_SOURCE = ROOT / "runtime/desktop_sync/workflow_authorization.mjs"
 NATIVE_MARKER = "ZCODE_DESKTOP_NATIVE_TRANSPORT_V1"
 SHIM_MARKER = "ZCODE_DESKTOP_SYNC_SHIM_V1"
 TARGET = "out/host/index.js"
@@ -81,6 +83,9 @@ ANCHOR_EXPOSE = "let Xi=fpe({agentService:Et,taskIndexRepo:T}),"
 REPLACEMENT_EXPOSE = (
     "let Xi=fpe({agentService:Et,taskIndexRepo:T}),"
     "__zcodeSyncBind=(globalThis.__zcodeDesktopSync=Xi),"
+    "__zcodeNativeReadInteractions=(typeof Ly===\"function\"&&typeof pn===\"function\"?"
+    "createZcodeNativeInteractionReader(S=>Ly(Et,pn({...S,runtimePolicy:\"existing-only\"},"
+    "{connectionId:\"zcode-native-interactions-v1:\"+process.pid,clientMode:\"desktop-continuous\"}))):null),"
     "__zcodeNativeBind=(globalThis.__zcodeDesktopNativeCreate=O=>createZcodeDesktopNativeTransport({"
     "...O,"
     "resolveProjectId:async S=>{"
@@ -112,12 +117,17 @@ REPLACEMENT_EXPOSE = (
     "if(hits.length>1)return{status:\"ambiguous\",projectId:null,count:hits.length};"
     "return{status:\"unique\",projectId:String(hits[0].id)};"
     "},"
-    "makeEnvelope:ti,syncer:()=>Xi,agent:Object.freeze(Object.fromEntries(["
+    "makeEnvelope:ti,syncer:()=>Xi,"
+    "readInteractions:__zcodeNativeReadInteractions,"
+    "agent:Object.freeze(Object.fromEntries(["
     '"createSession","closeSession","getWorkspaceRuntimeIdentity","getSessionLifecycle","readSession",'
     '"readSessionMessages","readSessionEvents","listSessionSubagents","listSessions","setModel",'
     '"setThoughtLevel","setMode","sendPrompt","sendConversationCommandV4",'
     '"conversationWorkflowRunsV4","conversationWorkflowRunEventsV4","reconcileSessionsIndexV4"'
     "].map(M=>[M,typeof Et[M]===\"function\"?Et[M].bind(Et):void 0]))) })),"
+    "__zcodeWorkflowAuthorizationBind=(globalThis.__zcodeDesktopWorkflowAuthorizationCreate=O=>createZcodeWorkflowAuthorization({"
+    "...O,agent:Et,makeEnvelope:ti,"
+    "readInteractions:__zcodeNativeReadInteractions})),"
 )
 ANCHOR_API = "mutateSessionFacts:ie,"
 REPLACEMENT_API = (
@@ -311,6 +321,7 @@ def make_plan(app_root: Path, manifest: dict | None = None) -> Plan:
         snippet = SHIM_SOURCE.read_text(encoding="utf-8")
         native = NATIVE_SOURCE.read_text(encoding="utf-8")
         policy = POLICY_SOURCE.read_text(encoding="utf-8")
+        workflow = WORKFLOW_SOURCE.read_text(encoding="utf-8")
     except OSError as error:
         raise ShimError(f"shim source is missing: {error}") from error
     if SHIM_MARKER not in snippet:
@@ -320,12 +331,18 @@ def make_plan(app_root: Path, manifest: dict | None = None) -> Plan:
     if native.count(NATIVE_MARKER) != 1 or native.count("export function createZcodeDesktopNativeTransport(") != 1:
         raise ShimError("native transport source marker or factory is not unique")
     native = native.replace("export function createZcodeDesktopNativeTransport(", "function createZcodeDesktopNativeTransport(", 1)
+    if native.count('export function createZcodeNativeInteractionReader(') != 1:
+        raise ShimError('native interaction reader is not unique')
+    native = native.replace('export function createZcodeNativeInteractionReader(', 'function createZcodeNativeInteractionReader(', 1)
     if policy.count('export function createZcodeWorkspacePolicy(') != 1:
         raise ShimError('workspace policy factory is not unique')
     policy = policy.replace('export function createZcodeWorkspacePolicy(', 'function createZcodeWorkspacePolicy(', 1)
+    if workflow.count('export function createZcodeWorkflowAuthorization(') != 1:
+        raise ShimError('workflow authorization factory is not unique')
+    workflow = workflow.replace('export function createZcodeWorkflowAuthorization(', 'function createZcodeWorkflowAuthorization(', 1)
     patched_text = text.replace(ANCHOR_EXPOSE, REPLACEMENT_EXPOSE, 1)
     patched_text = patched_text.replace(ANCHOR_API, REPLACEMENT_API, 1)
-    combined = patched_text + "\n" + policy + "\n" + native + "\n" + snippet
+    combined = patched_text + "\n" + policy + "\n" + workflow + "\n" + native + "\n" + snippet
     if combined.count(SHIM_MARKER) != 1:
         raise ShimError("patched output does not contain exactly one shim marker")
     patched = combined.encode("utf-8")
@@ -516,6 +533,7 @@ def configure(state_dir: Path, workspaces: list[str] | None = None, port: int = 
         "allowedWorkspaces": resolved,
         "workspacePolicy": policy,
         "nativeTransport": {"enabled": False, "ownershipPath": str(state_dir / "native-ownership.json")},
+        "workflowAuthorization": {"mode": "automatic"},
     }
     destination = state_dir / "control.json"
     _atomic_write(destination, (json.dumps(config, indent=2) + "\n").encode("utf-8"))

@@ -9,6 +9,7 @@
 - 原生新会话读取返回的项目归属；未归属项可能在折叠的“任务”组，不用 reload 或抢焦点来推断缺失。可恢复 interrupted 保持非终态，恢复或修订后重新 attach 活动工作，不重发原输入。
 - 需要独立子代理模型/强度时通常使用原生动态工作流。自然语言说明阶段、依赖、模型、强度和验收，不复制完整 ZCode skill。
 - 保留 session ID，读取真实问题和授权。accepted、首次 idle、waiting、error、paused 和仍有后台工作都不是完成；完成只认持久通知事件中的终态证据。
+- 工作流默认由 ZCode 侧 `workflow_authorization_mode=automatic` 自动选择真实的会话授权，不依赖 Codex 连接；可切到 `manual`。这不代答其他问题、不授予通知唤醒，也不提升规划只读会话。用 `zcode_pending` 读取全部原生选项和元数据；`zcode_answer` 可带 `session_id`，选择实际会话/完整访问选项或支持的自由文本、多选回复。`options_complete=false` 时需更新原生宿主，不用电脑点击或编造选项绕过。
 - 何时订阅：只在用户明确要求完成通知或自动续工的这个 chat 中订阅。派发时用 `zcode_send` 的 `notify={completion_notify,auto_continue,user_authorized:true}` 加 `idempotency_key`；对已经在运行的轮次或活动后台工作用 `zcode_notify_subscribe`。`user_authorized` 必须来自当前 chat 的明确授权，不能从旧会话、旧订阅或模型自己的推断补齐。
 - 何时可结束本轮：订阅已持久化且发送被接受（或 attach 成功）后即可结束，不必反复 `zcode_wait`。`zcode_wait` 最多 20 秒，只用于短期确认；没有订阅时它不会把 idle 当完成。
 - 如何读收件箱：被唤醒或稍后继续时，用 `zcode_notify_inbox(event_id=...)` 按事件 ID 读取；再用 `zcode_read_session`、`zcode_messages`、`zcode_workflows`、`zcode_pending` 重新读取真实结果并验收。拉取收件箱不是唤醒，toast、MCP 日志、工具返回和 `delivered` 也不是。

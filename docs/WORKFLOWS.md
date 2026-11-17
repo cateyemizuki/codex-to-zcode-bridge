@@ -7,7 +7,7 @@ GPT 侧通过自然语言指定目标即可，完整 skill 由 ZCode 自己加�
 1. 调用 `zcode_models` 取得实际 provider/model ID 和支持的强度。
 2. 在指定的已有绝对工作区创建 `workflow_mode=onDemand` 会话。
 3. 发送以 `/workflow ` 开头的任务，包含修改范围、阶段、先后依赖、可并行部分、每个角色的模型与强度、预算和验收。
-4. 首次 `CreateWorkflow` 可能要求授权，使用真实 pending 请求和实际选项处理。
+4. 默认由 ZCode 侧自动选择真实请求的“本会话内始终允许”，无需 Codex 连接。`workflow_authorization_mode=manual` 时读取完整 pending 请求和实际选项处理；旧 Host 需先更新加载，不能编造选项。策略不处理其他提问，也不提升规划只读模式。
 5. 通过 `zcode_workflows` 查看拓扑与结果，通过 `zcode_subagents` 找到实际子会话 ID，再分页读 `zcode_messages`。
 6. 长任务可在派发时带 `notify` 订阅完成事件，或在运行中调用 `zcode_notify_subscribe`；确认订阅已持久化后可以结束本轮，不反复 `zcode_wait`。
 7. 收到唤醒或稍后继续时，用 `zcode_notify_inbox(event_id=...)` 读取事件，再重新读取真实结果并验收。拉取收件箱本身不是唤醒。

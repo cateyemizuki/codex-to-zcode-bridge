@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -489,6 +490,16 @@ class Bridge:
             desktop, error = {'running': False, 'pid': None}, str(failure)
         native = self.desktop_native.status()
         probe = self.desktop_native.probe() if desktop['running'] else {}
+        workflow_policy = probe.get('workflowAuthorization') or {}
+        workflow_mode_valid = workflow_policy.get('mode') in ('automatic', 'manual')
+        native['workflow_authorization'] = {
+            'configured_mode': cfg.get('workflow_authorization_mode', 'automatic'),
+            'mode': workflow_policy.get('mode', 'unavailable'),
+            'running': workflow_policy.get('running') is True,
+            'state': ('configuration_unavailable' if workflow_policy.get('running') is True and not workflow_mode_valid else
+                      'ready' if workflow_policy.get('running') is True else
+                      workflow_policy.get('error') or ('host_update_required' if desktop['running'] else 'desktop_not_running')),
+        }
         connected = bool(probe.get('ok') and probe.get('ready') and probe.get('nativeAvailable')
                          and probe.get('desktopExecutable')
                          and os.path.normcase(str(Path(probe['desktopExecutable']).resolve()))
@@ -1759,6 +1770,9 @@ class Bridge:
                 if caller_mode(args) == 'plan':
                     raise ValueError('只读会话不能修改桥接配置')
                 saved = save_config(args['changes'])
+                if 'workflow_authorization_mode' in args['changes']:
+                    saved['workflow_authorization_status'] = self.desktop_native.save_workflow_authorization(
+                        saved['workflow_authorization_mode'])
             else:
                 saved = config()
             return {key: value for key, value in saved.items() if not key.startswith('desktop_sync_')}
@@ -1814,6 +1828,18 @@ class Bridge:
             if sid and self._is_native(sid):
                 return {'requests': self._native_pending_rows(sid),
                         'transport': 'desktop_native'}
+            if not sid:
+                native = [key for key, row in self.sessions.items()
+                          if row.get('transport') == 'desktop_native' and not row.get('read_only_child')]
+                if native:
+                    requests, unavailable = [], []
+                    for key in native:
+                        try:
+                            requests.extend(self._native_pending_rows(key))
+                        except Exception:
+                            unavailable.append(key)
+                    return {'requests': requests, 'transport': 'desktop_native',
+                            'unavailable_session_ids': unavailable}
             with self.lock:
                 rows = list(self.pending.values())
                 if sid:
@@ -1825,7 +1851,26 @@ class Bridge:
             with self.lock:
                 request = copy.deepcopy(self.pending.get(ident))
             if request is None:
-                raise ValueError('请求不存在或已经处理')
+                sid = args.get('session_id')
+                candidates = ([sid] if sid else [key for key, row in self.sessions.items()
+                              if row.get('transport') == 'desktop_native' and not row.get('read_only_child')])
+                found = []
+                for key in candidates:
+                    if not self._is_native(key):
+                        continue
+                    try:
+                        found.extend(row for row in self._native_pending_rows(key)
+                                     if row.get('id') == ident)
+                    except Exception:
+                        if sid:
+                            raise
+                if len(found) != 1:
+                    raise ValueError('请求不存在、已处理或存在歧义；请提供 session_id')
+                permission = caller_permission(args)
+                result = self._resolve_native_answer(found[0], args, permission)
+                return {'answered': True, 'transport': 'desktop_native',
+                        'session_id': found[0]['params']['sessionId'],
+                        'request_id': ident, 'native_result': result}
             if request['method'] == 'interaction/requestPermission':
                 params = request['params']
                 options = params.get('options', params.get('request', {}).get('options', []))
@@ -2521,6 +2566,34 @@ class Bridge:
         return sessions
 
     @staticmethod
+    def _native_pending_timestamps(item):
+        """Keep real announcement times in the observer's epoch-second unit.
+
+        Desktop snapshot timestamps use milliseconds. Missing timestamps must
+        stay unknown: polling an old request is not a new announcement.
+        """
+        result = {}
+        fields = {
+            'received_at': (('received_at', 1), ('requestedAt', 1000),
+                            ('createdAt', 1000)),
+            'last_announced_at': (('last_announced_at', 1),
+                                  ('lastAnnouncedAt', 1000)),
+        }
+        for target, candidates in fields.items():
+            for source, divisor in candidates:
+                value = item.get(source)
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    continue
+                try:
+                    value = float(value) / divisor
+                except (OverflowError, ValueError):
+                    continue
+                if math.isfinite(value) and value > 0:
+                    result[target] = value
+                    break
+        return result
+
+    @staticmethod
     def _native_questions_from_snapshot(snapshot, sid):
         """Extract real native pending interactions; never synthesize questions."""
         rows, seen = [], set()
@@ -2540,27 +2613,47 @@ class Bridge:
                 payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
                 kind = item.get('kind') or payload.get('kind')
                 if kind == 'userInput':
-                    params = {'sessionId': sid,
+                    params = {**copy.deepcopy(payload), 'sessionId': sid,
                               'toolName': payload.get('toolName') or 'AskUserQuestion',
-                              'input': {'questions': payload.get('questions') or []}}
+                              'input': copy.deepcopy(payload.get('input', payload))}
+                    if 'questions' not in params and isinstance(params['input'], dict):
+                        if isinstance(params['input'].get('questions'), list):
+                            params['questions'] = copy.deepcopy(params['input']['questions'])
                     method = 'interaction/requestUserInput'
                 elif kind == 'permission':
-                    params = {'sessionId': sid,
-                              'toolName': payload.get('toolName') or 'permission',
-                              'options': payload.get('options') or []}
+                    params = {**copy.deepcopy(payload), 'sessionId': sid,
+                              'toolName': payload.get('toolName') or payload.get('name') or 'permission',
+                              'options': copy.deepcopy(payload.get('options') or [])}
+                    if isinstance(payload.get('detail'), dict):
+                        params['input'] = copy.deepcopy(payload['detail'])
                     if isinstance(payload.get('fullAccessOption'), dict):
                         params['fullAccessOption'] = copy.deepcopy(
                             payload['fullAccessOption'])
                     if payload.get('modeSwitch') is not None:
                         params['modeSwitch'] = copy.deepcopy(payload['modeSwitch'])
+                    if params.get('modeSwitch') == 'fullAccessOnly' and 'fullAccessOption' not in params:
+                        params['fullAccessOption'] = {'optionId': NATIVE_FULL_ACCESS_OPTION,
+                            'label': 'Full access', 'kind': 'custom', 'response': {'decision': 'deny'}}
+                        params['fullAccessOptionSource'] = 'native_mode_switch'
                     method = 'interaction/requestPermission'
+                elif kind in ('pluginInstall', 'workspaceHookReview'):
+                    params = {**copy.deepcopy(payload), 'sessionId': sid}
+                    params['toolName'] = ('SuggestPluginInstall' if kind == 'pluginInstall'
+                                          else 'WorkspaceHookReview')
+                    method = ('interaction/requestPluginInstall' if kind == 'pluginInstall'
+                              else 'interaction/requestWorkspaceHookReview')
                 else:
-                    continue
+                    # A newer native dialog must remain visible and block
+                    # completion even when this bridge cannot submit it yet.
+                    params = {**copy.deepcopy(payload), 'sessionId': sid,
+                              'interactionKind': kind, 'unsupported': True}
+                    method = 'interaction/unsupported'
                 for key in ('requestId', 'toolCallId', 'reason', 'riskLevel'):
                     if item.get(key) is not None:
                         params[key] = copy.deepcopy(item[key])
                 rows.append({'id': interaction_id, 'method': method,
-                             'params': params, 'transport': 'desktop_native'})
+                             'params': params, 'transport': 'desktop_native',
+                             **Bridge._native_pending_timestamps(item)})
                 seen.add(interaction_id)
             for item in (container.get('pendingPermissions') or []):
                 if not isinstance(item, dict):
@@ -2594,19 +2687,44 @@ class Bridge:
                             item['fullAccessOption'])
                     if item.get('modeSwitch') is not None:
                         params['modeSwitch'] = copy.deepcopy(item['modeSwitch'])
+                    if params.get('modeSwitch') == 'fullAccessOnly' and 'fullAccessOption' not in params:
+                        params['fullAccessOption'] = {'optionId': NATIVE_FULL_ACCESS_OPTION,
+                            'label': 'Full access', 'kind': 'custom', 'response': {'decision': 'deny'}}
+                        params['fullAccessOptionSource'] = 'native_mode_switch'
                     if raw_input is not None:
                         params['input'] = copy.deepcopy(raw_input)
                     method = 'interaction/requestPermission'
                 params.update(identity)
                 rows.append({'id': request_id, 'method': method,
-                             'params': params, 'transport': 'desktop_native'})
+                             'params': params, 'transport': 'desktop_native',
+                             **Bridge._native_pending_timestamps(item)})
                 seen.add(request_id)
         return rows
 
     def _native_pending_rows(self, sid):
         workspace, permission = self._native_context(sid)
+        reader = getattr(self.desktop_native, 'interactions', None)
+        if callable(reader):
+            try:
+                view = reader(sid, workspace, permission)
+            except DesktopNativeError as error:
+                if error.code not in ('unsupported', 'unknown_op', 'native_host_update_required'):
+                    raise
+            else:
+                if not isinstance(view, dict) or view.get('sessionId') != sid or not isinstance(view.get('interactions'), list):
+                    raise ValueError('native_interactions_shape_invalid')
+                rows = self._native_questions_from_snapshot(
+                    {'pendingInteractions': view['interactions']}, sid)
+                for row in rows:
+                    row['options_complete'] = True
+                    row['live_native_pending'] = True
+                return rows
         snapshot = self.desktop_native.snapshot(sid, workspace, permission)
-        return self._native_questions_from_snapshot(snapshot, sid)
+        rows = self._native_questions_from_snapshot(snapshot, sid)
+        for row in rows:
+            row['options_complete'] = False
+            row['diagnostic'] = 'native_host_update_required_for_complete_options'
+        return rows
 
     def native_pending_for_sid(self, sid):
         """Observer-facing per-session pending facts; never a global engine list."""
@@ -3531,8 +3649,8 @@ class Bridge:
         options = question.get('options')
         if not isinstance(options, list) or not options:
             raise ValueError('answer_requires_response: 该问题没有可映射的选项，请提供显式 response')
-        text = str(question.get('question') or '').strip()
-        if not text:
+        text = str(question.get('question') or '')
+        if not text.strip():
             raise ValueError('answer_ambiguous: 题面缺失，不能生成 answers 映射')
         wanted = answer_text.strip()
         matches = []
@@ -3549,9 +3667,11 @@ class Bridge:
             raise ValueError('answer_option_invalid: answer 必须匹配唯一实际选项：'
                              + ' / '.join(label for label in labels if label))
         selected = matches[0]
-        chosen = str(selected.get('value') or selected.get('label') or '').strip()
-        if not chosen:
-            raise ValueError('answer_option_invalid: 匹配到的选项没有可用值')
+        chosen = selected.get('value')
+        if not isinstance(chosen, str):
+            chosen = str(selected.get('label') or '')
+            if not chosen.strip():
+                raise ValueError('answer_option_invalid: 匹配到的选项没有可用值')
         return {'action': 'accept', 'content': {'answers': {text: chosen}}}
 
     @staticmethod
@@ -3563,13 +3683,20 @@ class Bridge:
         full_access = params.get('fullAccessOption')
         if isinstance(full_access, dict):
             rows.append(full_access)
+        elif params.get('modeSwitch') == 'fullAccessOnly':
+            # The Desktop's permission UI presents this SDK-declared mode switch
+            # as the fixed fullAccess option even without a separate option row.
+            rows.append({'optionId': NATIVE_FULL_ACCESS_OPTION, 'kind': 'custom',
+                         'label': 'Full access', 'response': {'decision': 'deny'}})
+        if isinstance(params.get('workflowRevisionOption'), dict):
+            rows.append(params['workflowRevisionOption'])
         return rows
 
     @staticmethod
     def _native_option_is_deny(option):
         """True only for an explicitly denying permission choice."""
         kind = str(option.get('kind') or '')
-        if kind == 'deny':
+        if kind.lower().startswith(('deny', 'reject')):
             return True
         response = option.get('response')
         if isinstance(response, dict):
@@ -3583,16 +3710,19 @@ class Bridge:
         enforced before the resolve command leaves the bridge.  A report or an
         explicit ``response`` cannot bypass it.
         """
-        options = self._native_permission_options(request)
-        if not options:
-            raise ValueError('permission_unverifiable: 该权限请求没有可验证的选项')
+        params = request.get('params') or {}
         action = str(answer.get('action') or '')
         if action in NATIVE_DENY_CHOICES:
             if 'content' in answer:
                 raise ValueError('invalid_answer: 拒绝或取消不能携带 content')
+            if 'freeText' in answer and params.get('freeText') is not True:
+                raise ValueError('invalid_answer: 该请求不接受拒绝原因')
             return
-        if 'content' in answer or 'freeText' in answer:
-            raise ValueError('invalid_answer: 权限请求只接受实际 optionId')
+        options = self._native_permission_options(request)
+        if not options:
+            raise ValueError('permission_unverifiable: 该权限请求没有可验证的选项')
+        if 'content' in answer and params.get('freeText') is not True and not params.get('workflowRevisionOption'):
+            raise ValueError('invalid_answer: 该请求不支持结构化修改')
         option_id = str(answer.get('optionId') or '')
         if not option_id:
             raise ValueError('answer_requires_option: 权限请求必须选择实际 option_id')
@@ -3600,6 +3730,10 @@ class Bridge:
                          if str(row.get('optionId') or '') == option_id), None)
         if selected is None:
             raise ValueError('option_not_in_request: option_id 不属于该权限请求')
+        if selected.get('requiresFreeText') and not str(answer.get('freeText') or '').strip():
+            raise ValueError('invalid_answer: 提出修改必须包含具体反馈')
+        if 'freeText' in answer and not selected.get('requiresFreeText') and params.get('freeText') is not True:
+            raise ValueError('invalid_answer: 该请求不支持自由文本')
         if option_id == NATIVE_FULL_ACCESS_OPTION:
             # A real mode escalation to yolo; only an actual full_access
             # caller grant may cross it, never just user_approved.
@@ -3617,16 +3751,10 @@ class Bridge:
             raise ValueError(
                 'user_approved_required: 非 full_access 的权限允许需要真实用户批准')
 
-    def _native_agent_answer(self, args, job, source, permission):
-        sid = str(job.get('session_id') or '')
+    def _resolve_native_answer(self, request, args, permission):
+        sid = str(request.get('params', {}).get('sessionId') or '')
         workspace, _stored_permission = self._native_context(sid)
-        request_id = str(args.get('request_id') or '')
-        if not request_id:
-            raise ValueError('request_not_pending: 必须提供真实 request_id')
-        rows = self._native_pending_rows(sid)
-        request = next((row for row in rows if row.get('id') == request_id), None)
-        if request is None:
-            raise ValueError('request_not_pending: 该 request_id 不存在或已经处理')
+        request_id = str(request.get('id') or '')
         if self._requires_user_answer(request, args):
             raise ValueError('user_answer_required: 认证或真实用户偏好必须由用户本人回答')
         answer_text = args.get('answer')
@@ -3654,18 +3782,56 @@ class Bridge:
         else:
             raise ValueError('answer_required: 必须提供 answer、option_id 或 response')
         is_permission = request.get('method') == 'interaction/requestPermission'
+        special = request.get('method') in (
+            'interaction/requestPluginInstall', 'interaction/requestWorkspaceHookReview')
+        if request.get('method') == 'interaction/unsupported':
+            raise ValueError('unsupported_interaction_kind: 请在 ZCode 原生界面处理该交互')
+        if special:
+            hook = request['method'] == 'interaction/requestWorkspaceHookReview'
+            decision = native_answer.get('content', {})
+            if hook:
+                if not isinstance(decision, dict):
+                    raise ValueError('invalid_hook_response')
+                refuses = (decision.get('action') == 'revoke' or
+                           decision.get('action') == 'toggle' and decision.get('enabled') is False)
+            else:
+                refuses = (native_answer.get('action') in NATIVE_DENY_CHOICES or
+                           native_answer.get('optionId') == 'skip')
+            if not refuses:
+                if permission == 'read_only':
+                    raise ValueError('read_only_answer_not_allowed')
+                if permission != 'full_access' and args.get('user_approved') is not True:
+                    raise ValueError('user_approved_required')
         if is_permission:
             action = str(native_answer.get('action') or '')
             if action in NATIVE_DENY_CHOICES:
                 # A refusal must not smuggle an option that could escalate.
-                native_answer = {'action': action}
+                native_answer = {'action': action, **({'freeText': native_answer['freeText']}
+                    if 'freeText' in native_answer else {})}
+            elif 'freeText' in native_answer and 'optionId' not in native_answer:
+                revision = request.get('params', {}).get('workflowRevisionOption')
+                if isinstance(revision, dict):
+                    native_answer['optionId'] = revision['optionId']
             self._authorize_native_permission(request, native_answer, args, permission)
-        elif 'optionId' in native_answer:
-            raise ValueError('invalid_answer: 用户输入问题不接受 permission optionId')
+        elif not special and 'optionId' in native_answer:
+            options = request.get('params', {}).get('options') or []
+            if not any(row.get('optionId') == native_answer['optionId'] for row in options
+                       if isinstance(row, dict)):
+                raise ValueError('option_not_in_request: 用户输入选项不属于当前问题')
         result = self.desktop_native.resolve(
             sid, workspace, permission, request_id, native_answer,
             request_id='resolve_' + uuid.uuid4().hex,
             user_approved=args.get('user_approved') is True)
+        return result
+
+    def _native_agent_answer(self, args, job, source, permission):
+        sid = str(job.get('session_id') or '')
+        request_id = str(args.get('request_id') or '')
+        rows = self._native_pending_rows(sid)
+        request = next((row for row in rows if row.get('id') == request_id), None)
+        if request is None:
+            raise ValueError('request_not_pending: 该 request_id 不存在或已经处理')
+        result = self._resolve_native_answer(request, args, permission)
         self.superagent.record_progress(job['job_id'], source['thread_id'],
                                         kind='answer', status='answered')
         return {'answered': True, 'transport': 'desktop_native',

@@ -253,6 +253,12 @@ def classify_pending(subscription, pending, now, ttl=3600):
         if not session or session not in own:
             unattributed.append(ident)
             continue
+        # A complete SDK interaction snapshot proves this exact request is still
+        # unanswered now. Do not discard it merely because its original creation
+        # time is old or omitted. This is not a synthetic announcement timestamp.
+        if item.get('transport') == 'desktop_native' and item.get('live_native_pending') is True:
+            fresh.append(ident)
+            continue
         announced = max(float(item.get('received_at') or 0), float(item.get('last_announced_at') or 0))
         if announced and announced >= sent_at and now - announced <= ttl:
             fresh.append(ident)

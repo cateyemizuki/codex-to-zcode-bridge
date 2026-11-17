@@ -100,7 +100,7 @@ Desktop 新工作区黑名单还需要新版 shim，重载 MCP 本身不会替�
 | 会话已保存但桌面列表没有 | 检查 `desktop.indexed`；独立引擎不实时推送到已打开项目，`indexed` 也不等于侧栏当前可见 |
 | 消息分页/锚点为 null | 0.3.1 起兼容 3.17 的 `info.id` 与 3.18.2 的 `info.messageId`；没有任何 ID 时保留调用方 anchor，不伪造 ID |
 | ZCode 获得焦点 | 只有明确的工作区打开才应发生，不用该操作刷新列表 |
-| 首次动态工作流仍要求授权 | 正常读取并处理真实请求，完全访问不能伪造该步骤 |
+| 工作流仍等待授权 | 检查 ZCode 原生 Host 是否已更新加载，以及 `workflow_authorization_mode` 是否为 `automatic`；手动模式或无实际会话授权选项时读取完整原生请求处理 |
 | 收件箱有事件但没有自动回到 chat | 收件箱是拉取路径；先看 `zcode_notify_status` 的宿主能力。立即 `pipe_unavailable` 时检查 Codex 侧 `env_vars` 的三个宿主变量并重载 MCP；事件保留，不要把拉取说成已唤醒 |
 | 宿主唤醒失败、超时或握手失败 | 事件保留在待送队列并按退避重试；检查本机 Codex Desktop 是否提供第一方 MCP 的 `send_message_to_thread`，跨版本不保证 |
 | 订阅显示 `send_uncertain` | 发送可能已经执行；不要自动重发，只有用户明确要求时才用 `retry=true`，可能产生重复 |

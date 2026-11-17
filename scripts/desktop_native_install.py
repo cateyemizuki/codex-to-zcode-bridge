@@ -27,6 +27,12 @@ so the engine must stay byte-identical.
 digest with the install. Rollback refuses to overwrite anything that changed
 after installation and never writes the engine.
 
+``update-host`` rebuilds only the host JavaScript from the recorded original
+archive, checks its syntax, and updates the owned installation ledger. It
+preserves profiles, control tokens, ownership and the original archive. Dry-run
+can inspect a live install; applying refuses while ZCode is running and never
+stops or restarts it.
+
 No command accepts a manifest, a skip-hash flag, an arbitrary path to execute
 or a generic RPC surface. All values below are fixed for Desktop 3.18.2.
 """
@@ -40,12 +46,13 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-import desktop_sync_copy as copy_tool  # noqa: E402
+import asar_reader as copy_tool  # noqa: E402
 import desktop_sync_shim as shim  # noqa: E402
 
 
@@ -924,6 +931,86 @@ def status(target: Path | None, state_dir: Path) -> dict:
 # rollback
 
 
+def update_host(target: Path, state_dir: Path, dry_run: bool = False, probe=None) -> dict:
+    """Replace only the verified host JS; never stop or start an application."""
+    state_dir = state_dir.expanduser().resolve()
+    target = target.expanduser().resolve()
+    current = status(target, state_dir)
+    if not current.get('ok') or current.get('status') != 'applied':
+        raise NativeInstallError('host update requires an unchanged, owned native installation')
+    ledger = load_ledger(state_dir)
+    app_dir = target / APP_REL
+    host = app_dir / HOST_REL
+    previous = host.read_bytes()
+    previous_hash = sha256_bytes(previous)
+    if previous_hash != ledger['hashes']['hostPatched']:
+        raise NativeInstallError('installed host differs from its recorded hash')
+    archive = target / ASAR_BACKUP_REL
+    original = copy_tool.asar_entry(archive, HOST_REL)
+    if sha256_bytes(original) != HOST_SHA256:
+        raise NativeInstallError('original host hash is not the reviewed build')
+    with tempfile.TemporaryDirectory(prefix='zcode-native-host-update-') as temporary:
+        candidate = Path(temporary).resolve()
+        _require_within(candidate, Path(tempfile.gettempdir()).resolve(), 'temporary host update')
+        (candidate / HOST_REL).parent.mkdir(parents=True)
+        (candidate / HOST_REL).write_bytes(original)
+        (candidate / 'package.json').write_bytes(copy_tool.asar_entry(archive, 'package.json'))
+        patched = shim.make_plan(candidate).patched
+        node = shutil.which('node')
+        if not node:
+            raise NativeInstallError('Node is required to check the host update syntax')
+        preview = candidate / 'host-update.mjs'
+        preview.write_bytes(patched)
+        checked = subprocess.run([node, '--check', str(preview)], capture_output=True, timeout=30)
+        if checked.returncode:
+            raise NativeInstallError('host update JavaScript syntax check failed')
+    patched_hash = sha256_bytes(patched)
+    report = {'ok': True, 'command': 'update-host', 'dryRun': dry_run,
+              'previousSha256': previous_hash, 'patchedSha256': patched_hash,
+              'updated': False, 'wouldUpdate': patched_hash != previous_hash,
+              'activation': 'not_verified', 'restartsApplication': False,
+              'engine': _engine_fact(target / ENGINE_REL)}
+    if previous_hash == patched_hash:
+        return report
+    entries = tree_manifest(app_dir)
+    expected = [({**entry, 'size': len(patched), 'sha256': patched_hash}
+                 if entry['path'] == HOST_REL else entry) for entry in entries]
+    if tree_digest(entries) != ledger['tree']['digest']:
+        raise NativeInstallError('application tree changed while preparing host update')
+    report['requiresZCodeExit'] = bool(processes_from_target(target, probe)['running'])
+    if dry_run:
+        return report
+    if report['requiresZCodeExit']:
+        raise NativeInstallError('close the installed ZCode before applying the host update; it will not be restarted automatically')
+    backup = state_dir / 'host-updates' / (previous_hash + '.js')
+    _require_within(backup, state_dir, 'host update backup')
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    if backup.exists() and sha256_file(backup) != previous_hash:
+        raise NativeInstallError('host update backup collision')
+    if not backup.exists():
+        shim._atomic_write(backup, previous)
+    previous_ledger = ledger_path(state_dir).read_bytes()
+    try:
+        shim._atomic_write(host, patched)
+        tree = tree_facts(app_dir)
+        if tree['digest'] != tree_digest(expected):
+            raise NativeInstallError('unexpected application change during host update')
+        ledger['hashes']['hostPatched'] = patched_hash
+        ledger['tree'] = tree
+        ledger.setdefault('hostUpdates', []).append({
+            'at': _now(), 'previousSha256': previous_hash, 'patchedSha256': patched_hash})
+        _save_ledger(state_dir, ledger)
+    except Exception as error:
+        try:
+            shim._atomic_write(host, previous)
+            shim._atomic_write(ledger_path(state_dir), previous_ledger)
+        except Exception as compensation:
+            raise NativeInstallError('host update failed and compensation needs inspection') from compensation
+        raise NativeInstallError('host update failed; previous host and ledger restored') from error
+    report.update(updated=True, backup=str(backup), requiresManualStart=True)
+    return report
+
+
 def _release_state_artifacts(state_dir: Path) -> list[str]:
     """Drop this install's private derived state once the tree is gone.
 
@@ -1168,6 +1255,10 @@ def main(argv: list[str] | None = None) -> int:
     status_parser.add_argument("--target", type=Path)
     status_parser.add_argument("--dry-run", action="store_true", help="no-op; status never writes")
 
+    update_parser = commands.add_parser("update-host", help="update only the verified native host; never restart ZCode")
+    update_parser.add_argument("--target", type=Path, required=True)
+    update_parser.add_argument("--dry-run", action="store_true")
+
     rollback_parser = commands.add_parser("rollback", help="restore the recorded original files")
     rollback_parser.add_argument("--target", type=Path)
     rollback_parser.add_argument("--dry-run", action="store_true")
@@ -1182,6 +1273,8 @@ def main(argv: list[str] | None = None) -> int:
             result = apply(args.target, args.state_dir, args.dry_run)
         elif args.command == "status":
             result = status(args.target, args.state_dir)
+        elif args.command == "update-host":
+            result = update_host(args.target, args.state_dir, args.dry_run)
         elif args.command == "rollback":
             result = rollback(args.target, args.state_dir, args.dry_run)
         else:  # pragma: no cover - argparse enforces the set

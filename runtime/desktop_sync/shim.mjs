@@ -59,6 +59,23 @@ import * as __zcodeSyncCrypto from 'node:crypto';
     catch { return null; }
   };
   const syncer = () => globalThis.__zcodeDesktopSync || null;
+  let workflowAuthorization = null;
+  let workflowAuthorizationError = '';
+  try {
+    const create = globalThis.__zcodeDesktopWorkflowAuthorizationCreate;
+    if (typeof create === 'function') {
+      workflowAuthorization = create({ resolveWorkspace: resolveAllowed,
+        readConfig: () => {
+          // Local workflow consent is independent of the external bridge API.
+          return JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        } });
+      workflowAuthorization.start();
+    } else workflowAuthorizationError = 'host_update_required';
+  } catch {
+    try { workflowAuthorization?.dispose(); } catch {}
+    workflowAuthorization = null;
+    workflowAuthorizationError = 'initialization_failed';
+  }
   let nativeTransport;
   async function callNative(message) {
     // The flag is re-read so disabling it takes effect without restarting a job.
@@ -175,6 +192,9 @@ import * as __zcodeSyncCrypto from 'node:crypto';
       blockedPathCount: policy.mode === 'blacklist' ? policy.pathCount : 0,
       subscribedWorkspaceCount: subscribed.size,
       nativeAvailable: typeof globalThis.__zcodeDesktopNativeCreate === 'function',
+      workflowAuthorization: workflowAuthorization?.status() ?? {
+        mode: 'unavailable', running: false, error: workflowAuthorizationError,
+      },
       events: events.slice(-50),
     };
   }

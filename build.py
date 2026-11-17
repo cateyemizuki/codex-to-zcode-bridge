@@ -29,6 +29,24 @@ def build(destination):
         shutil.copy2(ROOT/'scripts/installer.py', target/'install.py')
         shutil.copy2(ROOT/'LICENSE', target/'LICENSE')
         shutil.copytree(ROOT/'runtime/assets', target/'assets', dirs_exist_ok=True)
+        # Keep the matching, explicit native-host updater with either plugin.
+        # Ordinary MCP installation still never patches or restarts Desktop.
+        native_assets = target/'runtime/desktop_sync'
+        native_assets.mkdir(parents=True, exist_ok=True)
+        for asset in ('native_bootstrap.mjs', 'native_transport.mjs', 'shim.mjs',
+                      'workspace_policy.mjs', 'workflow_authorization.mjs'):
+            shutil.copy2(ROOT/'runtime/desktop_sync'/asset, native_assets/asset)
+        for helper in ('desktop_native_install.py', 'desktop_sync_shim.py', 'asar_reader.py'):
+            (target/'scripts').mkdir(exist_ok=True)
+            shutil.copy2(ROOT/'scripts'/helper, target/'scripts'/helper)
+        obsolete = target/'scripts/desktop_sync_copy.py'
+        if obsolete.is_file():
+            assert obsolete.resolve().is_relative_to(destination.resolve())
+            obsolete.unlink()
+        obsolete_bootstrap = native_assets/'bootstrap.mjs'
+        if obsolete_bootstrap.is_file():
+            assert obsolete_bootstrap.resolve().is_relative_to(destination.resolve())
+            obsolete_bootstrap.unlink()
         for name in ('README.md','AGENTS.md'):
             shutil.copy2(ROOT/'docs'/host/name, target/name)
         write(target/'_host.json', {'host':host, 'version':VERSION})

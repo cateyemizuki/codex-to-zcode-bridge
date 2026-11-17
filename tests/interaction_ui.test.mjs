@@ -71,6 +71,17 @@ test('permission refinements use the actual free-text answer channel', async () 
   assert.deepEqual(ui.answer().response, { action: 'accept', optionId: 'workflowRefine', freeText: 'Only one worker' });
 });
 
+test('real native Refine choice retains its required feedback metadata without an empty-submit button', async () => {
+  const ui=await render({id:'refine-native',method:'interaction/requestPermission',params:{sessionId:'session-1',
+    freeText:true,options:[{optionId:'workflowRefine',kind:'custom',label:'Refine',response:{decision:'deny'}}],
+    workflowRevisionOption:{optionId:'workflowRefine',kind:'custom',label:'Request changes',requiresFreeText:true}}});
+  assert.equal(ui.elements.some(e=>e.tagName==='button'&&e.textContent==='Refine'),false);
+  ui.elements.find(e=>e.tagName==='textarea').value='Keep the single stage';
+  await ui.elements.find(e=>e.tagName==='button'&&e.textContent==='提交修改要求').onclick();
+  assert.equal(ui.answer().response.optionId,'workflowRefine');
+  assert.equal(ui.answer().response.freeText,'Keep the single stage');
+});
+
 test('native answer drafts and multiple custom values survive a manual submission', async () => {
   const ui = await render({ id: 'draft-1', method: 'interaction/requestUserInput', params: {
     sessionId: 'session-1', freeText: true, answerDrafts: { Choose: ['a', 'custom,one', 'custom two'] },

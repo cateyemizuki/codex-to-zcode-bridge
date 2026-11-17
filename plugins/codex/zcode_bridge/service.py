@@ -3689,7 +3689,9 @@ class Bridge:
             rows.append({'optionId': NATIVE_FULL_ACCESS_OPTION, 'kind': 'custom',
                          'label': 'Full access', 'response': {'decision': 'deny'}})
         if isinstance(params.get('workflowRevisionOption'), dict):
-            rows.append(params['workflowRevisionOption'])
+            revision = params['workflowRevisionOption']
+            original = next((row for row in rows if row.get('optionId') == revision.get('optionId')), {})
+            rows.insert(0, {**original, **revision})
         return rows
 
     @staticmethod

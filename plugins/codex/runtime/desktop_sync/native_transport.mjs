@@ -751,7 +751,10 @@ export function createZcodeDesktopNativeTransport({
             fail('invalid_answer', 'this permission does not accept a structured revision');
           }
           const options = interaction.payload.options.filter(plain);
-          if (plain(interaction.payload.workflowRevisionOption)) options.push(interaction.payload.workflowRevisionOption);
+          if (plain(interaction.payload.workflowRevisionOption)) {
+            const revision = interaction.payload.workflowRevisionOption;
+            options.unshift({ ...options.find(row => row.optionId === revision.optionId), ...revision });
+          }
           const fullAccess = plain(interaction.payload.fullAccessOption)
             ? interaction.payload.fullAccessOption : interaction.payload.modeSwitch === 'fullAccessOnly'
               ? { optionId: FULL_ACCESS_OPTION_ID, kind: 'custom', label: 'Full access' } : null;

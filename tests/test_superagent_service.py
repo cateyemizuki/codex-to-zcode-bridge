@@ -2403,6 +2403,19 @@ class SuperagentServiceTests(unittest.TestCase):
             'response': answer, 'caller_permission_mode': 'full_access'})
         self.assertEqual(native.resolve_calls[-1]['answer'], answer)
 
+    def test_real_refine_option_does_not_hide_required_feedback(self):
+        native, delegated = self.native_permission_delegate('full_access')
+        sid = delegated['session_id']
+        self.complete_native_request(native, sid, {'kind': 'permission', 'toolName': 'CreateWorkflow',
+            'freeText': True, 'options': [{'optionId': 'workflowRefine', 'kind': 'custom',
+                'label': 'Refine', 'response': {'decision': 'deny'}}],
+            'workflowRevisionOption': {'optionId': 'workflowRefine', 'kind': 'custom',
+                'label': 'Request changes', 'requiresFreeText': True}})
+        with self.assertRaisesRegex(ValueError, 'invalid_answer'):
+            self.call('zcode_answer', {'session_id': sid, 'request_id': 'complete-request',
+                'option_id': 'workflowRefine', 'caller_permission_mode': 'full_access'})
+        self.assertEqual(native.resolve_calls, [])
+
     def test_single_answer_preserves_exact_question_key_and_explicit_empty_value(self):
         request = {'params': {'input': {'questions': [{'question': ' Choose ',
                     'options': [{'label': 'Unset', 'value': ''}]}]}}}

@@ -388,6 +388,22 @@ class NotificationServiceTests(unittest.TestCase):
         self.assertTrue(recovered.get('reconciled'))
         self.assertEqual(self.send_calls, [])
 
+    def test_v4_input_intent_reconciles_an_accepted_send_without_resending(self):
+        self.bridge.notifications.begin_arming(SID, CTX_A, consent_row(),
+            input_id='native-command',
+            idempotency_key_hash=hashlib.sha256(b'key-1').hexdigest(), engine_pid=4242)
+        sub_id = self.bridge.notifications.all_subscriptions()[0]['subscription_id']
+        self.bridge.notifications.claim_send(sub_id)
+        self.message_rows = [{'info': {'messageId': 'foreign-user', 'role': 'user',
+            'metadata': {'inputIntent': {'sourceCommandId': 'another-command'}}}}]
+        self.assertTrue(self.call('zcode_send', notify_args())['send_uncertain'])
+        self.message_rows = [{'info': {'messageId': 'accepted-user', 'role': 'user',
+            'metadata': {'conversationInputIntent': {'sourceCommandId': 'native-command'}}}}]
+        result = self.call('zcode_send', notify_args())
+        self.assertTrue(result['accepted'])
+        self.assertTrue(result['reconciled'])
+        self.assertEqual(self.send_calls, [])
+
     # --------------------------------------------------------------- leases
     def test_other_chats_are_blocked_by_the_session_owner(self):
         self.store_sub(thread='chat-A', state='running')

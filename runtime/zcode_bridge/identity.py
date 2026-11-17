@@ -19,6 +19,27 @@ def message_identity(message):
     return next((value for value in candidates if value not in (None, '')), None)
 
 
+def message_input_ids(message):
+    """Read actual input-id echoes, including native V4 user intent metadata.
+
+    Only the fixed identifier fields are used. Prompt text, timestamps and
+    assistant-authored metadata never substitute for a user input echo.
+    """
+    if not isinstance(message, dict):
+        return set()
+    info = message.get('info') if isinstance(message.get('info'), dict) else {}
+    result = {str(info[key]) for key in ('inputId', 'clientInputId', 'requestId', 'userInputId')
+              if info.get(key)}
+    result.update(str(message[key]) for key in ('inputId', 'clientInputId') if message.get(key))
+    if (info.get('role') or message.get('role')) == 'user':
+        metadata = info.get('metadata') if isinstance(info.get('metadata'), dict) else {}
+        for key in ('inputIntent', 'conversationInputIntent'):
+            intent = metadata.get(key)
+            if isinstance(intent, dict) and isinstance(intent.get('sourceCommandId'), str) and intent['sourceCommandId']:
+                result.add(intent['sourceCommandId'])
+    return result
+
+
 def is_visible_message(message):
     """True when a transcript entry may be shown or used as an anchor.
 

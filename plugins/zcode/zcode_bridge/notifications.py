@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .storage import read_json, write_json
 from .identity import (is_assistant_response, is_visible_message,
-                       message_activity_digest, message_identity)
+                       message_activity_digest, message_identity, message_input_ids)
 
 SCHEMA_VERSION = 1
 
@@ -1976,6 +1976,20 @@ class Observer:
         last_assistant = ''
         last_assistant_message = None
 
+        # V4 user rows echo the accepted command ID in input intent metadata.
+        # This remains usable when the older event decoder rejects newer event
+        # variants. Bind to the actual user row before selecting any reply.
+        if input_id:
+            for message in rows:
+                info = message.get('info') or {}
+                if (not is_visible_message(message)
+                        or (info.get('role') or message.get('role')) != 'user'):
+                    continue
+                if input_id in message_input_ids(message) and message_identity(message):
+                    anchor = user_message_id = str(message_identity(message))
+                    anchor_proof = 'input_id_echo'
+                    break
+
         # ZCode 3.18 returns a no-cursor session/messages page oldest-first,
         # and its first row can be a visible model-change timeline_event.
         # Associate the armed turn by the native turn.started messageId and
@@ -2001,10 +2015,7 @@ class Observer:
                 anchor_proof = 'native_turn_started'
                 user_message_id = native_started_id
             elif not native_started_id and input_id:
-                ids = {str(info.get(key)) for key in
-                       ('inputId', 'clientInputId', 'requestId', 'userInputId') if info.get(key)}
-                ids.update(str(message.get(key)) for key in ('inputId', 'clientInputId')
-                           if message.get(key))
+                ids = message_input_ids(message)
                 if input_id in ids:
                     anchor_proof = 'input_id_echo'
                     if role == 'user':

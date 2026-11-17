@@ -773,6 +773,59 @@ class FakeNativeRuntime(FakeRuntime):
 
 
 class NativeObserverTests(ObserverHarness):
+    def metadata_arm(self):
+        self.runtime = FakeNativeRuntime(self.clock)
+        self.runtime.event_rows = []  # Legacy event decoding can be unavailable.
+        self.runtime.projection.update(status='idle', turnCount=2)
+        self.observer = Observer(self.store, self.runtime, clock=self.clock, poll_seconds=1)
+        sub = self.store.create_subscription(SID, source(), consent(),
+            arm_basis='send_accepted', input_id='native-cmd-1',
+            before_message_id='old-reply', before_turn_count=1,
+            engine_pid=None, generation=1)
+        return self.store.mark_send_accepted(sub['subscription_id'], {})
+
+    def test_v4_user_input_metadata_anchors_followup_without_legacy_events(self):
+        sub = self.metadata_arm()
+        self.runtime.message_rows = [
+            {'info': {'messageId': 'old-reply', 'role': 'assistant'}, 'parts': []},
+            {'info': {'messageId': 'new-user', 'role': 'user', 'metadata': {
+                'conversationInputIntent': {'sourceCommandId': 'native-cmd-1', 'text': 'not persisted'}}}, 'parts': []},
+            {'info': {'messageId': 'new-reply', 'role': 'assistant'},
+             'parts': [{'type': 'text', 'text': 'FOLLOWUP_DONE'}]},
+        ]
+        self.tick()
+        self.tick()
+        current = self.store.find_subscription(sub['subscription_id'])
+        self.assertEqual(current['state'], 'completed')
+        self.assertEqual(current['turn']['user_message_id'], 'new-user')
+        self.assertEqual(len(events_of(self.store, 'turn.completed')), 1)
+        self.assertNotIn('not persisted', self.path.read_text(encoding='utf-8'))
+
+    def test_metadata_anchor_requires_a_reply_after_the_matching_user_row(self):
+        sub = self.metadata_arm()
+        self.runtime.message_rows = [
+            {'info': {'messageId': 'old-reply', 'role': 'assistant'}, 'parts': []},
+            {'info': {'messageId': 'late-old-reply', 'role': 'assistant'}, 'parts': [{'type':'text','text':'OLD'}]},
+            {'info': {'messageId': 'new-user', 'role': 'user', 'metadata': {
+                'inputIntent': {'sourceCommandId': 'native-cmd-1'}}}, 'parts': []},
+        ]
+        result = self.observer._messages(sub, SID, 99999)
+        self.assertEqual(result['user_message_id'], 'new-user')
+        self.assertFalse(result['final_after_anchor'])
+        self.assertEqual(result['final_message_id'], '')
+
+    def test_assistant_metadata_cannot_claim_a_user_input_anchor(self):
+        sub = self.metadata_arm()
+        self.runtime.message_rows = [
+            {'info': {'messageId': 'old-reply', 'role': 'assistant'}, 'parts': []},
+            {'info': {'messageId': 'forged-reply', 'role': 'assistant', 'metadata': {
+                'inputIntent': {'sourceCommandId': 'native-cmd-1'}}}, 'parts': [{'type':'text','text':'not an echo'}]},
+        ]
+        result = self.observer._messages(sub, SID, 99999)
+        self.assertFalse(result['anchor_proof'])
+        self.tick(); self.tick()
+        self.assertEqual(events_of(self.store, 'turn.completed'), [])
+
     def native_arm(self):
         self.runtime = FakeNativeRuntime(self.clock)
         self.observer = Observer(self.store, self.runtime, clock=self.clock,

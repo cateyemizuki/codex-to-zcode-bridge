@@ -18,7 +18,7 @@ from .storage import (config, configured_default_workspace, defaults, read_json,
                       save_config, state_dir, write_json)
 from .workflows import topology
 from .identity import (is_visible_message, message_activity_digest,
-                       message_identity)
+                       message_identity, message_input_ids)
 from .notifications import (NotificationStore, Observer, has_anchor_proof,
                             make_input_id, subscription_anchor, TERMINAL_STATES,
                             _run_state as workflow_run_state)
@@ -1300,10 +1300,7 @@ class Bridge:
             if not is_visible_message(message):
                 continue
             info = message.get('info') or {}
-            ids = {str(info.get(key)) for key in
-                   ('inputId', 'clientInputId', 'requestId', 'userInputId') if info.get(key)}
-            ids.update(str(message.get(key)) for key in ('inputId', 'clientInputId')
-                       if message.get(key))
+            ids = message_input_ids(message)
             if input_id not in ids:
                 continue
             role = info.get('role') or message.get('role')
@@ -3689,7 +3686,9 @@ class Bridge:
             rows.append({'optionId': NATIVE_FULL_ACCESS_OPTION, 'kind': 'custom',
                          'label': 'Full access', 'response': {'decision': 'deny'}})
         if isinstance(params.get('workflowRevisionOption'), dict):
-            rows.append(params['workflowRevisionOption'])
+            revision = params['workflowRevisionOption']
+            original = next((row for row in rows if row.get('optionId') == revision.get('optionId')), {})
+            rows.insert(0, {**original, **revision})
         return rows
 
     @staticmethod

@@ -61,21 +61,31 @@ import * as __zcodeSyncCrypto from 'node:crypto';
   const syncer = () => globalThis.__zcodeDesktopSync || null;
   let workflowAuthorization = null;
   let workflowAuthorizationError = '';
-  try {
+  function startWorkflowAuthorization() {
+    if (workflowAuthorization) return;
     const create = globalThis.__zcodeDesktopWorkflowAuthorizationCreate;
-    if (typeof create === 'function') {
+    if (typeof create !== 'function') {
+      workflowAuthorizationError = 'initializing';
+      return;
+    }
+    try {
       workflowAuthorization = create({ resolveWorkspace: resolveAllowed,
         readConfig: () => {
           // Local workflow consent is independent of the external bridge API.
           return JSON.parse(fs.readFileSync(configPath, 'utf8'));
         } });
       workflowAuthorization.start();
-    } else workflowAuthorizationError = 'host_update_required';
-  } catch {
-    try { workflowAuthorization?.dispose(); } catch {}
-    workflowAuthorization = null;
-    workflowAuthorizationError = 'initialization_failed';
+      workflowAuthorizationError = '';
+    } catch {
+      try { workflowAuthorization?.dispose(); } catch {}
+      workflowAuthorization = null;
+      workflowAuthorizationError = 'initialization_failed';
+    }
   }
+  // Host service construction may finish after this appended module runs.
+  // Both orders start the policy locally, without an external API request.
+  globalThis.__zcodeDesktopWorkflowAuthorizationReady = startWorkflowAuthorization;
+  startWorkflowAuthorization();
   let nativeTransport;
   async function callNative(message) {
     // The flag is re-read so disabling it takes effect without restarting a job.

@@ -257,6 +257,19 @@ test('native complete question preserves generic options without treating them a
     interaction_id: 'question-1', answer: { optionId: 'invented' } })).error, 'option_not_in_request');
 });
 
+test('native workflowRefine option cannot hide required feedback metadata', async t => {
+  const f=fixture(t,{readInteractions:async target=>({sessionId:target.sessionId,mode:'yolo',interactions:[{
+    interactionId:'refine-real',kind:'permission',payload:{kind:'permission',toolName:'CreateWorkflow',freeText:true,
+      options:[{optionId:'workflowRefine',kind:'custom',label:'Refine',response:{decision:'deny'}}]}}]})});
+  const sid=(await f.create()).result.sessionId;
+  const args={session_id:sid,interaction_id:'refine-real',answer:{optionId:'workflowRefine'}};
+  assert.equal((await f.call('native_resolve',{...args,request_id:'empty-refine'})).error,'invalid_answer');
+  assert.equal(f.calls.some(c=>c.name==='sendConversationCommandV4'),false);
+  const answer={optionId:'workflowRefine',freeText:'Keep the single stage'};
+  assert.equal((await f.call('native_resolve',{...args,request_id:'valid-refine',answer,
+    caller_permission_mode:'read_only'})).ok,true);
+});
+
 test('plugin installation exposes actual UI choices and keeps full caller approval boundaries', async t => {
   const f = fixture(t, {readInteractions: async target => ({sessionId:target.sessionId, mode:'yolo',
     interactions:[{interactionId:'plugin-1',kind:'pluginInstall',payload:{kind:'pluginInstall',action:'install'}}]})});

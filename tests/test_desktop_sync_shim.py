@@ -180,6 +180,19 @@ class DesktopSyncShimTests(unittest.TestCase):
         self.assertIn("await T.getProjectRepository()", text)
         self.assertIn("ZCODE_DESKTOP_NATIVE_TRANSPORT_V1", text)
 
+    def test_sdk_binding_notifies_the_local_policy_after_factory_registration(self):
+        node = shutil.which('node')
+        self.assertIsNotNone(node)
+        script = ("let called=0;const Et={},T={};const fpe=()=>({});"
+                  "const ti=()=>{};const createZcodeWorkflowAuthorization=()=>{};"
+                  "const createZcodeDesktopNativeTransport=()=>{};"
+                  "globalThis.__zcodeDesktopWorkflowAuthorizationReady=()=>{"
+                  "if(typeof globalThis.__zcodeDesktopWorkflowAuthorizationCreate!=='function')throw Error('factory not bound');called++;};"
+                  + shim.REPLACEMENT_EXPOSE.rstrip(',') + ";if(called!==1)throw Error('policy not notified');")
+        completed = subprocess.run([node, '--input-type=module', '-e', script],
+                                   capture_output=True, text=True, encoding='utf-8', timeout=30)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_injected_resolver_matches_only_one_active_local_project(self):
         node = shutil.which("node")
         self.assertIsNotNone(node, "Node is required to execute the injected resolver text")

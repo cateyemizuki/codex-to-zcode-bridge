@@ -128,6 +128,7 @@ REPLACEMENT_EXPOSE = (
     "__zcodeWorkflowAuthorizationBind=(globalThis.__zcodeDesktopWorkflowAuthorizationCreate=O=>createZcodeWorkflowAuthorization({"
     "...O,agent:Et,makeEnvelope:ti,"
     "readInteractions:__zcodeNativeReadInteractions})),"
+    "__zcodeWorkflowAuthorizationStarted=globalThis.__zcodeDesktopWorkflowAuthorizationReady?.(),"
 )
 ANCHOR_API = "mutateSessionFacts:ie,"
 REPLACEMENT_API = (

@@ -85,3 +85,32 @@ test('host shim re-reads rules for sync and the native resolver', async () => {
     assert.equal(nativeResolver(root), null);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const bindingOrder of ['before-shim', 'after-shim']) {
+  test(`workflow policy starts once when SDK is bound ${bindingOrder}`, () => {
+    const root=fs.mkdtempSync(path.join(os.tmpdir(),'workflow-startup-'));
+    try {
+      const configPath=path.join(root,'control.json');
+      fs.writeFileSync(configPath,JSON.stringify({token:'fixture-token-1234567890',
+        workspacePolicy:{mode:'blacklist',blockedPaths:[]},nativeTransport:{enabled:false}}));
+      let creates=0,starts=0;
+      const factory=()=>{creates++;return{start(){starts++;},status(){return{mode:'automatic',running:true};}};};
+      const context={process:{env:{ZCODE_DESKTOP_SYNC_CONFIG:configPath},platform:process.platform,pid:1},
+        __zcodeSyncFs:fs,__zcodeSyncPath:path,__zcodeSyncCrypto:crypto,
+        __zcodeSyncNet:{createServer(){return{on(){return this;},listen(){},unref(){}};}},
+        createZcodeWorkspacePolicy,Buffer};
+      if(bindingOrder==='before-shim')context.__zcodeDesktopWorkflowAuthorizationCreate=factory;
+      const source=fs.readFileSync(new URL('../runtime/desktop_sync/shim.mjs',import.meta.url),'utf8')
+        .replace(/^import .*;\r?\n/gm,'');
+      vm.runInNewContext(source,context);
+      assert.equal(typeof context.__zcodeDesktopWorkflowAuthorizationReady,'function');
+      if(bindingOrder==='after-shim'){
+        assert.equal(creates,0);
+        context.__zcodeDesktopWorkflowAuthorizationCreate=factory;
+      }
+      context.__zcodeDesktopWorkflowAuthorizationReady();
+      context.__zcodeDesktopWorkflowAuthorizationReady();
+      assert.equal(creates,1);assert.equal(starts,1);
+    } finally {fs.rmSync(root,{recursive:true,force:true});}
+  });
+}

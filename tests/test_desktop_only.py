@@ -192,3 +192,27 @@ class DesktopOnlyTests(unittest.TestCase):
         self.assertTrue(result['needs_native_ui'])
         self.assertFalse(result['workspace_open_requested'])
         ensure.assert_called_once()
+
+    def test_workflow_node_memory_option_does_not_create_false_second_main(self):
+        executable = str(self.root / 'ZCode.exe')
+        workflow = str(self.root / '.zcode/workflow-runs/dwfrun-unit.mjs')
+        rows = [
+            {'ProcessId': 1, 'ParentProcessId': 100, 'ExecutablePath': executable,
+             'CommandLine': '"' + executable + '"'},
+            {'ProcessId': 2, 'ParentProcessId': 1, 'ExecutablePath': executable,
+             'CommandLine': '"' + executable + '" app-server --stdio --surface desktop'},
+            {'ProcessId': 3, 'ParentProcessId': 2, 'ExecutablePath': executable,
+             'CommandLine': '"' + executable + '" --max-old-space-size=256 "' + workflow + '"'},
+        ]
+        self.assertEqual(inspect_desktop(executable, rows=rows), {'running': True, 'pid': 1})
+
+    def test_memory_option_without_script_still_counts_as_main(self):
+        executable = str(self.root / 'ZCode.exe')
+        rows = [
+            {'ProcessId': 1, 'ParentProcessId': 100, 'ExecutablePath': executable,
+             'CommandLine': '"' + executable + '"'},
+            {'ProcessId': 2, 'ParentProcessId': 1, 'ExecutablePath': executable,
+             'CommandLine': '"' + executable + '" --max-old-space-size=256'},
+        ]
+        with self.assertRaisesRegex(DesktopInstanceError, 'multiple_desktop_instances'):
+            inspect_desktop(executable, rows=rows)

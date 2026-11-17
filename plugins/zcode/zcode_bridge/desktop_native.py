@@ -35,7 +35,7 @@ OPERATIONS = frozenset({
     'native_messages', 'native_events', 'native_workflows',
     'native_workflow_events', 'native_resolve', 'native_cancel',
     'native_pending', 'native_children', 'native_topology', 'native_lifecycle',
-    'native_child_messages', 'native_child_snapshot',
+    'native_child_messages', 'native_child_snapshot', 'native_interactions',
 })
 MUTATIONS = frozenset({'native_model_catalog', 'native_create', 'native_send',
                        'native_resolve', 'native_cancel'})
@@ -76,6 +76,23 @@ class DesktopNativeAdapter:
 
     def control_file(self):
         return str(self._settings().get('desktop_native_control_file', '') or '')
+
+    def save_workflow_authorization(self, mode):
+        if mode not in ('automatic', 'manual'):
+            raise ValueError('工作流授权模式无效')
+        path = self.control_file()
+        if not path:
+            return {'configuration_saved': False, 'reason': 'native_control_not_configured'}
+        try:
+            control = json.loads(Path(path).read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return {'configuration_saved': False, 'reason': 'native_control_unavailable'}
+        if not isinstance(control, dict):
+            raise ValueError('native_control_invalid')
+        from .storage import write_json
+        control['workflowAuthorization'] = {'mode': mode}
+        write_json(Path(path), control)
+        return {'configuration_saved': True, 'mode': mode}
 
     def _control(self):
         if not self.enabled():
@@ -173,6 +190,10 @@ class DesktopNativeAdapter:
 
     def snapshot(self, session_id, workspace, permission):
         return self._request('native_snapshot', workspace, permission,
+                             {'session_id': session_id})
+
+    def interactions(self, session_id, workspace, permission):
+        return self._request('native_interactions', workspace, permission,
                              {'session_id': session_id})
 
     def messages(self, session_id, workspace, permission, after_message_id=None,

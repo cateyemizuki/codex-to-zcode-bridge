@@ -36,7 +36,7 @@ python install.py
 
 长任务可以在派发时建立完成订阅，然后结束本轮，不必反复调用 `zcode_wait`。完成事件持久化后，可回到原 chat 按事件 ID 读取收件箱并验收；宿主支持时，桥接也会尝试唤醒原 chat。详见下节。
 
-为子代理单独选模型和思考强度时，通常创建 `onDemand` 会话，发送 `/workflow` 自然语言任务，说明范围、阶段、并行、依赖、模型和验收。首次动态工作流授权仍须处理真实请求。
+为子代理单独选模型和思考强度时，通常创建 `onDemand` 会话，发送 `/workflow` 自然语言任务，说明范围、阶段、并行、依赖、模型和验收。更新后的 ZCode 原生接入默认自动选择实际工作流请求的“本会话内始终允许”，独立于 Codex 连接；设置 `workflow_authorization_mode=manual` 可恢复手动选择。设置面板和 `zcode_pending` 保留完整原生选项，自由文本、多选、修改工作流设置及特殊授权均按各自原生通道提交。规划只读模式不自动提升。
 
 0.5.4 默认且仅支持正式 ZCode Desktop 的原生会话。已运行就复用唯一主进程；未运行时只按配置启动已安装的主程序。会话与后续消息由 Desktop 自动更新，无需旧的 Desktop 补同步开关。独立引擎、复制件任务和显式 `engine` 已禁用；接入缺失、实例不唯一或不支持的操作明确报错。安装门禁及回滚见 [正式安装说明](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md)，默认值和自动更新见 [桌面连接](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_ONLY.md)。
 

@@ -3,11 +3,27 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createZcodeDesktopNativeTransport } from '../runtime/desktop_sync/native_transport.mjs';
+import { createZcodeDesktopNativeTransport, createZcodeNativeInteractionReader } from '../runtime/desktop_sync/native_transport.mjs';
 
 const chosen = { providerId: 'example-provider', modelId: 'example-model' };
 const another = { providerId: 'example-provider', modelId: 'plain-model' };
 const copy = (value) => structuredClone(value);
+
+test('interaction reads serialize session aliases and never return full conversation rows', async () => {
+  let active=0,maxActive=0,release;
+  const gate=new Promise(resolve=>release=resolve),calls=[];
+  const reader=createZcodeNativeInteractionReader(async target=>{
+    active++;maxActive=Math.max(maxActive,active);calls.push(target.workspacePath);
+    if(calls.length===1)await gate;
+    active--;return {logEpoch:'epoch',revision:1,config:{mode:'yolo'},pendingInteractions:[],rows:['PRIVATE_ROWS']};
+  });
+  const first=reader({workspacePath:'/first',sessionId:'same-session'});
+  const second=reader({workspacePath:'/alias',workspaceIdentity:'alias',sessionId:'same-session'});
+  await new Promise(resolve=>setTimeout(resolve,0));assert.equal(calls.length,1);
+  release();const results=await Promise.all([first,second]);
+  assert.equal(maxActive,1);assert.deepEqual(calls,['/first','/alias']);
+  assert.equal(JSON.stringify(results).includes('PRIVATE_ROWS'),false);
+});
 
 // 3.18.2 Wc's strict object contract: providerId, modelId, optional strict
 // options:{reasoningLevel?:nonempty string}. This fake-native boundary rejects
@@ -191,6 +207,7 @@ function fixture(t, overrides = {}) {
   };
   const options = { agent, ownershipPath, resolveWorkspace: (value) => value === workspace ? workspace : null,
     makeEnvelope: (value) => ({ ...value, issuedAt: 100 }), syncer: () => syncer,
+    ...(overrides.readInteractions ? { readInteractions: overrides.readInteractions } : {}),
     ...(overrides.resolveProjectId ? { resolveProjectId: overrides.resolveProjectId } : {}) };
   let transport = createZcodeDesktopNativeTransport(options);
   const request = (op, extra = {}) => ({ op, workspace, caller_permission_mode: 'full_access', ...extra });
@@ -200,6 +217,96 @@ function fixture(t, overrides = {}) {
     reload() { transport = createZcodeDesktopNativeTransport(options); },
     restartEngine() { identity = 'different-engine'; }, unloadSession() { unloaded = true; } };
 }
+
+test('complete native interactions retain the session option and revision input', async t => {
+  const interaction = { interactionId: 'complete-1', kind: 'permission', payload: {
+    kind: 'permission', name: 'CreateWorkflow', freeText: true,
+    options: [{ optionId: 'allow_once', kind: 'allowOnce', label: 'Allow once' },
+      { optionId: 'allowSession', kind: 'allow_session', label: 'Always allow in this session' }],
+    fullAccessOption: { optionId: 'fullAccess', kind: 'custom', label: 'Full access' },
+  } };
+  const f = fixture(t, { readInteractions: async target => ({
+    sessionId: target.sessionId, mode: 'yolo', interactions: [interaction],
+  }) });
+  const sid = (await f.create()).result.sessionId;
+  const view = await f.call('native_interactions', { session_id: sid });
+  assert.equal(view.ok, true); assert.equal(view.result.optionsComplete, true);
+  assert.deepEqual(view.result.interactions[0].payload.options, interaction.payload.options);
+  assert.deepEqual(view.result.interactions[0].payload.fullAccessOption, interaction.payload.fullAccessOption);
+  assert.equal(view.result.interactions[0].payload.workflowRevisionOption.optionId, 'workflowRefine');
+  const chosen = await f.call('native_resolve', { session_id: sid, request_id: 'full-choice',
+    interaction_id: 'complete-1', answer: { optionId: 'allowSession' } });
+  assert.equal(chosen.ok, true);
+  const revision = await f.call('native_resolve', { session_id: sid, request_id: 'revision-choice',
+    interaction_id: 'complete-1', answer: { action: 'accept', freeText: 'Use one worker' } });
+  assert.equal(revision.ok, true);
+  const actual = f.calls.filter(c=>c.name==='sendConversationCommandV4').at(-1).input.envelope.payload.answer;
+  assert.equal(actual.optionId, 'workflowRefine');
+  assert.equal(actual.freeText, 'Use one worker');
+});
+
+test('native complete question preserves generic options without treating them as permissions', async t => {
+  const f = fixture(t, { readInteractions: async target => ({ sessionId: target.sessionId,
+    mode: 'yolo', interactions: [{ interactionId: 'question-1', kind: 'userInput',
+      payload: { kind: 'userInput', freeText: false, options: [{ optionId: 'real-choice', label: 'Continue' }] } }],
+  }) });
+  const sid = (await f.create()).result.sessionId;
+  assert.equal((await f.call('native_resolve', { session_id: sid, request_id: 'real-answer',
+    interaction_id: 'question-1', answer: { action: 'accept', optionId: 'real-choice' } })).ok, true);
+  assert.equal((await f.call('native_resolve', { session_id: sid, request_id: 'invented-answer',
+    interaction_id: 'question-1', answer: { optionId: 'invented' } })).error, 'option_not_in_request');
+});
+
+test('plugin installation exposes actual UI choices and keeps full caller approval boundaries', async t => {
+  const f = fixture(t, {readInteractions: async target => ({sessionId:target.sessionId, mode:'yolo',
+    interactions:[{interactionId:'plugin-1',kind:'pluginInstall',payload:{kind:'pluginInstall',action:'install'}}]})});
+  const sid=(await f.create()).result.sessionId;
+  const view=await f.call('native_interactions',{session_id:sid});
+  assert.deepEqual(view.result.interactions[0].payload.options.map(o=>o.optionId),['skip','install']);
+  assert.equal((await f.call('native_resolve',{session_id:sid,request_id:'plugin-weak',
+    caller_permission_mode:'always_ask',interaction_id:'plugin-1',answer:{optionId:'install'}})).error,'user_approved_required');
+  assert.equal((await f.call('native_resolve',{session_id:sid,request_id:'plugin-skip',
+    caller_permission_mode:'read_only',interaction_id:'plugin-1',answer:{action:'cancel'}})).ok,true);
+  assert.deepEqual(f.calls.filter(c=>c.name==='sendConversationCommandV4').at(-1).input.envelope.payload.answer,{optionId:'skip'});
+});
+
+test('Hook review uses immutable native context, validates selections and permits read-only revocation', async t => {
+  const interaction={interactionId:'hook-1',kind:'workspaceHookReview',payload:{kind:'workspaceHookReview',
+    interactionId:'hook-1',sessionId:'pending',taskId:'task',runId:'run',workspaceIdentity:'workspace',
+    bundleDigest:'a'.repeat(64),reviewFlowId:'flow',generation:1,
+    items:[{reviewItemId:'item-1',editable:true,configuredEnabled:true}]}};
+  const f=fixture(t,{readInteractions:async target=>({sessionId:target.sessionId,mode:'yolo',interactions:[interaction]})});
+  const sid=(await f.create()).result.sessionId;interaction.payload.sessionId=sid;
+  const resolve=(request_id,content,extra={})=>f.call('native_resolve',{session_id:sid,request_id:'hook-'+request_id,
+    interaction_id:'hook-1',answer:{action:'accept',content},...extra});
+  assert.equal((await resolve('wrong',{action:'trust_selected',reviewItemIds:['invented']})).error,'invalid_hook_response');
+  assert.equal((await resolve('readonly-trust',{action:'trust_selected',reviewItemIds:['item-1']},
+    {caller_permission_mode:'read_only'})).error,'read_only_resolution_not_allowed');
+  assert.equal((await resolve('trust',{action:'trust_selected',reviewItemIds:['item-1']})).ok,true);
+  let envelope=f.calls.filter(c=>c.name==='sendConversationCommandV4').at(-1).input.envelope;
+  assert.equal(envelope.type,'respondWorkspaceHookReview');assert.equal(envelope.payload.generation,1);
+  assert.deepEqual(envelope.payload.decision,{action:'trust_selected',reviewItemIds:['item-1']});
+  assert.equal((await resolve('revoke',{action:'revoke',reviewItemIds:['item-1']},{caller_permission_mode:'read_only'})).ok,true);
+  envelope=f.calls.filter(c=>c.name==='sendConversationCommandV4').at(-1).input.envelope;
+  assert.equal(envelope.type,'revokeWorkspaceHookTrust');
+});
+
+test('the real session permission is resolved by the SDK even while its prompt is running', async t => {
+  const f = fixture(t, { readInteractions: async target => ({ sessionId: target.sessionId,
+    mode: 'edit', interactions: [{ interactionId: 'workflow-consent', kind: 'permission', payload: {
+      kind: 'permission', name: 'CreateWorkflow', options: [
+        { optionId: 'allowSession', kind: 'allow_session', label: 'Always allow in this session' }],
+    } }],
+  }) });
+  const sid = (await f.create()).result.sessionId;
+  const current = f.sessions.get(sid);
+  current.session.status = 'running'; current.settings.permission.mode = 'edit'; current.settings.mode.current = 'edit';
+  const before = f.calls.length;
+  const result = await f.call('native_resolve', { session_id: sid, request_id: 'session-choice-running',
+    interaction_id: 'workflow-consent', answer: { optionId: 'allowSession' } });
+  assert.equal(result.ok, true);
+  assert.equal(f.calls.slice(before).filter(row => row.name === 'setMode').length, 0);
+});
 
 test('real module wires plan catalogue, closes probe, then creates requested native task', async (t) => {
   const f = fixture(t), response = await f.create({ project_id: 'requested-project' });

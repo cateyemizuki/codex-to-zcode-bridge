@@ -68,6 +68,7 @@ def effective_values(cfg, choices):
 def read():
     cfg, choices = catalogue()
     values = effective_values(cfg, choices)
+    values.setdefault('workflow_authorization_mode', 'automatic')
     for key in NOTIFY_TITLES:
         values.setdefault(key, cfg.get(key, NOTIFY_DEFAULTS[key]))
     for key, fallback in (('default_transport','desktop_native'),
@@ -82,6 +83,7 @@ def read():
         levels.append(cfg['default_thought_level'])
     native = native_status()
     native_state = str(native.get('state') or 'unknown')
+    workflow_state = (native.get('workflow_authorization') or {}).get('state', 'unknown')
     properties = {
         'default_workspace':{'type':'string','title':'默认工作区','minLength':1},
         'default_model':{'type':'string','title':'默认主代理模型','enum':options,
@@ -89,6 +91,9 @@ def read():
         'default_thought_level':{'type':'string','title':'默认思考强度','enum':levels,
             'description':'切换模型时自动采用它支持的默认强度；手动指定时应与该模型兼容'},
         'default_workflow_mode':{'type':'string','title':'动态工作流模式','enum':['onDemand','alwaysOn','disabled']},
+        'workflow_authorization_mode':{'type':'string','title':'工作流授权',
+            'enum':['automatic','manual'],
+            'description':'默认自动选择“本会话内始终允许”，由 ZCode 侧独立处理；切换为 manual 后逐次手动选择。当前状态：'+workflow_state},
         'auto_launch_desktop':{'type':'boolean','title':'ZCode 未运行时自动启动'},
         **{key:{'type':'string','title':title} for key,title in PATH_TITLES.items()},
         **{key:{'type':'integer','title':title,'minimum':NOTIFY_RANGES[key][0],
@@ -111,7 +116,7 @@ def read():
     values = {key: values[key] for key in properties if key in values}
     return {'schema':{'type':'object','properties':properties},'values':values,'layout':[
         {'kind':'group','title':'模型与工作区','items':[{'kind':'property','property':key} for key in
-            ('default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop')]},
+            ('default_workspace','default_model','default_thought_level','default_workflow_mode','workflow_authorization_mode','auto_launch_desktop')]},
         {'kind':'group','title':'桌面原生连接','items':[{'kind':'property','property':key} for key in
             ('desktop_native_control_file',)]},
         {'kind':'group','title':'Superagent 自动回传','items':[{'kind':'property','property':key} for key in
@@ -127,7 +132,7 @@ def update(arguments):
     if not isinstance(changes,dict) or not changes:
         raise ValueError('set 必须包含要更新的配置项')
     cfg, choices = catalogue()
-    allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','auto_launch_desktop',
+    allowed = {'default_workspace','default_model','default_thought_level','default_workflow_mode','workflow_authorization_mode','auto_launch_desktop',
         *PATH_TITLES,*NOTIFY_TITLES,*SUPERAGENT_TITLES,*NATIVE_TITLES}
     if set(changes)-allowed:
         raise ValueError('未知配置项')
@@ -139,6 +144,9 @@ def update(arguments):
         elif key == 'default_transport':
             if value != 'desktop_native':
                 raise ValueError('会话后端无效：'+str(value))
+        elif key == 'workflow_authorization_mode':
+            if value not in ('automatic', 'manual'):
+                raise ValueError('工作流授权模式无效')
         elif key in NOTIFY_RANGES or key in SUPERAGENT_RANGES:
             low, high = (NOTIFY_RANGES.get(key) or SUPERAGENT_RANGES[key])
             if type(value) is not int or not low <= value <= high:
@@ -166,6 +174,7 @@ def update(arguments):
     # a person's edit. Model-driven updates still use zcode_settings + caller mode.
     saved = local_call('zcode_settings',{'changes':changes,'caller_permission_mode':'full_access'})
     values = effective_values(saved, choices)
+    values.setdefault('workflow_authorization_mode', 'automatic')
     for key, fallback in (('default_transport','desktop_native'),
                           ('desktop_native_enabled',True),
                           ('desktop_native_control_file','')):
@@ -176,6 +185,7 @@ def update(arguments):
 def definitions():
     types = {'default_workspace':{'type':'string'},'default_model':{'type':'string'},
         'default_thought_level':{'type':'string'},'default_workflow_mode':{'type':'string','enum':['onDemand','alwaysOn','disabled']},
+        'workflow_authorization_mode':{'type':'string','enum':['automatic','manual']},
         'auto_launch_desktop':{'type':'boolean'},
         'default_transport':{'type':'string','enum':['desktop_native'],'readOnly':True},
         'desktop_native_enabled':{'type':'boolean'},

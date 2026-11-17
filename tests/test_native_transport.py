@@ -43,6 +43,24 @@ class NativeTransportBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
+    def test_zcode_workflow_authorization_without_codex(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        completed = subprocess.run(
+            [node, "--test", str(ROOT / "tests/workflow_authorization.test.mjs")],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_complete_interaction_settings_ui(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        completed = subprocess.run(
+            [node, "--test", str(ROOT / "tests/interaction_ui.test.mjs")],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

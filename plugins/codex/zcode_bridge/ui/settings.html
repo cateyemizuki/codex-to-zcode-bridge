@@ -12,12 +12,13 @@
 <label for="model">默认主代理模型</label><select id="model"></select>
 <label for="thought">默认思考强度</label><select id="thought"></select>
 <label for="workflow">动态工作流</label><select id="workflow"><option value="onDemand">按需使用</option><option value="alwaysOn">始终可用</option><option value="disabled">关闭</option></select>
+<label for="workflow-authorization">工作流授权</label><select id="workflow-authorization"><option value="automatic">全自动：本会话内始终允许（默认）</option><option value="manual">手动选择</option></select><div class="small">由 ZCode 侧独立处理，不需要 Codex 保持连接。手动模式保留全部原生授权选项。</div><div id="workflow-authorization-state" class="small">正在读取 ZCode 侧授权状态</div>
 <label><input id="autostart" type="checkbox"> ZCode 未运行时启动已安装的主程序</label>
 <div class="notice" style="margin-top:18px">权限跟随 GPT 当前会话。GPT 为完全访问时，ZCode 使用完全访问；权限降低后，下次操作同步降低。</div>
 <details><summary>桌面连接</summary><label for="exe">已安装的 ZCode 主程序</label><input id="exe"><label for="native-control">桌面原生接入控制文件</label><input id="native-control"></details>
 <div class="actions"><button id="save">保存配置</button><button id="reload-models" class="secondary">重新读取模型</button></div>
 </section>
-<section class="card"><h2>待处理问题与授权</h2><div id="pending" class="small">暂无待处理请求</div></section>
+<section class="card"><h2>待处理问题与授权</h2><label for="pending-session">目标会话</label><select id="pending-session"></select><div id="pending-state" class="small"></div><div id="pending" class="small">暂无待处理请求</div></section>
 <section class="card"><h2>任务观察</h2>
 <label for="stall-seconds">无可观测进展判定（秒）</label><input id="stall-seconds" type="number" min="60" max="86400">
 <label for="read-threshold">连续读取失败阈值</label><input id="read-threshold" type="number" min="2" max="50">
@@ -34,7 +35,7 @@
 </div><div>
 <section class="card"><h2>已配置模型</h2><div id="models" class="models small">正在读取</div></section>
 <section class="card"><h2>桥接会话</h2><div id="sessions" class="sessions small">暂无会话</div></section>
-<section class="card"><h2>动态工作流能做什么</h2><p class="small">用自然语言说明目标、工作区、阶段、先后依赖和并行关系，为每个子代理指定已配置的模型与思考强度，并约定结果和验收方式。</p><p class="small">普通子代理沿用会话模型。需要独立选择子代理模型时，明确要求主代理使用动态工作流。每个新会话首次使用时仍会产生授权请求，可在上方处理。</p></section>
+<section class="card"><h2>动态工作流能做什么</h2><p class="small">用自然语言说明目标、工作区、阶段、先后依赖和并行关系，为每个子代理指定已配置的模型与思考强度，并约定结果和验收方式。</p><p class="small">普通子代理沿用会话模型。需要独立选择子代理模型时，明确要求主代理使用动态工作流。默认自动允许本会话运行工作流；切为手动后，可在上方查看完整请求并选择。</p></section>
 </div></div></main>
 <script>
 const $=id=>document.getElementById(id);let cfg=null,models=[],rpcSeq=0;const inflight=new Map();const localToken=['127.0.0.1','localhost'].includes(location.hostname)?location.hash.slice(1):'';const framed=window.parent!==window;
@@ -47,10 +48,162 @@ function el(tag,text,className){const e=document.createElement(tag);if(text!==un
 function updateThought(){const selected=models.find(m=>JSON.stringify(m.ref)===$('model').value);$('thought').replaceChildren();const automatic=el('option','跟随模型默认');automatic.value='auto';$('thought').append(automatic);for(const level of selected?.reasoning?.levels||[]){const option=el('option',level.label);option.value=level.value;$('thought').append(option)}$('thought').value=cfg?.default_thought_level||'auto';if(!$('thought').value)$('thought').value='auto'}
 function renderModels(){const list=$('models');list.replaceChildren();$('model').replaceChildren();const unselected=el('option','请选择默认模型');unselected.value=JSON.stringify({providerId:'',modelId:''});$('model').append(unselected);for(const m of models){const row=el('div',undefined,'item');row.append(el('strong',m.label),el('div',m.providerLabel,'small'),el('code',m.ref.providerId+' / '+m.ref.modelId));list.append(row);const option=el('option',m.providerLabel+' · '+m.label);option.value=JSON.stringify(m.ref);$('model').append(option)}$('model').value=JSON.stringify(cfg.default_model);updateThought()}
 function renderSessions(state){const root=$('sessions');root.replaceChildren();const rows=state.managed_session_details||(state.managed_sessions||[]).map(id=>({session_id:id}));for(const session of rows){const row=el('div',undefined,'item');row.append(el('strong',session.label||'ZCode 会话'),el('code',session.session_id));if(session.workspace)row.append(el('div',session.workspace,'small'));if(session.model)row.append(el('div',session.model.modelId+' · '+(session.thought_level||'默认强度'),'small'));row.append(el('div','最近同步权限：'+(session.caller_permission_mode||'未知'),'small'));const details=el('details'),summary=el('summary','读取会话内容'),pre=el('pre');details.append(summary,pre);details.ontoggle=async()=>{if(details.open&&!pre.textContent){try{const result=await call('zcode_read_session',{session_id:session.session_id,max_chars:6000});pre.textContent=JSON.stringify({model:result.settings.model.current,permission:result.settings.permission,messages:result.messages},null,2)}catch(e){pre.textContent=e.message}}};row.append(details);root.append(row)}if(!root.children.length)root.append(el('span','暂无桥接创建的会话'));$('connection').textContent=state.connected?'已连接':'未连接'}
-let pendingSignature='';async function renderPending(){const data=await call('zcode_pending');const signature=JSON.stringify((data.requests||[]).map(r=>[r.id,r.params]));if(signature===pendingSignature)return;pendingSignature=signature;const root=$('pending');root.replaceChildren();for(const request of data.requests||[]){const p=request.params||{},row=el('div',undefined,'item');row.append(el('strong',p.reason||p.prompt||request.method));row.append(el('code',p.sessionId||''));if(request.method==='interaction/requestPermission'){const preview=el('details'),heading=el('summary','查看操作内容'),body=el('pre',JSON.stringify(p.input||{},null,2));preview.append(heading,body);row.append(preview);const options=el('div',undefined,'options');for(const opt of p.options||[]){const b=el('button',opt.name||opt.kind);b.className=opt.kind==='deny'?'secondary':'';b.onclick=async()=>{try{await call('zcode_answer',{request_id:String(request.id),option_id:opt.optionId,caller_permission_mode:'full_access',user_approved:true});await renderPending();notice('授权请求已处理')}catch(e){notice(e.message,true)}};options.append(b)}row.append(options)}else{const answers={},custom=[];for(const q of p.questions||[]){row.append(el('label',q.question));const select=el('select');select.multiple=!!q.multiSelect;for(const opt of q.options||[]){const option=el('option',opt.label);option.value=opt.value||opt.label;select.append(option)}const chosen=()=>q.multiSelect?Array.from(select.selectedOptions).map(x=>x.value).join(', '):select.value;select.onchange=()=>answers[q.question]=chosen();answers[q.question]=chosen();if(select.options.length)row.append(select);const input=el('input');input.placeholder=select.options.length?'或输入自定义回答':'请输入回答';row.append(input);custom.push([q.question,input])}const b=el('button','提交回答');b.style.marginTop='12px';b.onclick=async()=>{try{for(const [question,input]of custom)if(input.value.trim())answers[question]=input.value;await call('zcode_answer',{request_id:String(request.id),caller_permission_mode:'full_access',response:{action:'accept',content:{answers}}});await renderPending();notice('回答已提交')}catch(e){notice(e.message,true)}};row.append(b);const advanced=el('details'),heading=el('summary','结构化回复（高级）'),input=el('textarea'),submit=el('button','提交结构化回复');input.rows=6;input.value=JSON.stringify({action:'accept',content:{}},null,2);submit.onclick=async()=>{try{await call('zcode_answer',{request_id:String(request.id),caller_permission_mode:'full_access',response:JSON.parse(input.value)});await renderPending();notice('回复已提交')}catch(e){notice(e.message,true)}};advanced.append(heading,input,submit);row.append(advanced)}root.append(row)}if(!root.children.length)root.append(el('span','暂无待处理请求'))}
+function interactionChoices(p){
+  const full=p.fullAccessOption||(p.modeSwitch==='fullAccessOnly'?{optionId:'fullAccess',label:'Full access',kind:'custom'}:null);
+  const values=[...(p.options||[]),...(full?[full]:[]),...(p.workflowRevisionOption?[p.workflowRevisionOption]:[])],seen=new Set();
+  const rank=v=>v.optionId==='fullAccess'?1.5:/allow.*always|always.*allow/i.test(v.kind)?1:/allow/i.test(v.kind)?0:/deny|reject/i.test(v.kind)?2:4;
+  return values.filter(v=>v&&typeof v.optionId==='string'&&!seen.has(v.optionId)&&seen.add(v.optionId)).sort((a,b)=>rank(a)-rank(b));
+}
+function renderInteractionSessionSelector(state){
+  const select=$('pending-session'),previous=select.value;
+  const sessions=(state.managed_session_details||[]).filter(s=>s.transport==='desktop_native'&&!s.read_only_child).sort((a,b)=>(b.created_at||0)-(a.created_at||0));
+  select.replaceChildren();
+  for(const s of sessions){const option=el('option',s.label||s.session_id);option.value=s.session_id;select.append(option);}
+  select.value=sessions.some(s=>s.session_id===previous)?previous:sessions[0]?.session_id||'';
+}
+let pendingSignature='',pendingBusy=false;
+async function renderPending(){
+  if(pendingBusy)return;
+  const sessionId=$('pending-session').value;
+  if(!sessionId){$('pending').replaceChildren(el('span','请选择目标会话'));return;}
+  pendingBusy=true;
+  try{
+  const data=await call('zcode_pending',{session_id:sessionId});
+  if($('pending-session').value!==sessionId)return;
+  $('pending-state').textContent='';
+  const signature=JSON.stringify([sessionId,data.requests,data.unavailable_session_ids]);
+  if(signature===pendingSignature)return;
+  pendingSignature=signature;
+  const root=$('pending');root.replaceChildren();
+  for(const request of data.requests||[]){
+    const p=request.params||{},row=el('div',undefined,'item');
+    row.append(el('strong',p.summary||p.reason||p.prompt||p.toolName||request.method),el('code',p.sessionId||''));
+    if(request.options_complete===false)row.append(el('div','本机原生接入需要更新，当前返回的选项可能不完整。','notice error'));
+    const workflowChanges={},workflowInput=[p.detail,p.input,p.detail?.input,p.input?.input].find(v=>v&&typeof v==='object'&&v.adjustable_settings);
+    let workflowNumber=null;
+    let answering=false;
+    const send=async answer=>{if(answering)return;answering=true;try{
+      const selected=interactionChoices(p).find(o=>o.optionId===answer.option_id);
+      if(request.method==='interaction/requestPermission'&&selected&&Object.keys(workflowChanges).length
+        &&(/allow/i.test(selected.kind||'')||selected.response?.decision==='allow')){
+        if(workflowNumber?.validity?.badInput)throw Error('请输入有效的并发数');
+        if('max_concurrency'in workflowChanges&&workflowChanges.max_concurrency!==null){
+          const value=workflowChanges.max_concurrency,ceiling=workflowInput.adjustable_settings.concurrency_ceiling;
+          if(!Number.isInteger(value)||value<1||Number.isInteger(ceiling)&&value>ceiling)throw Error('并发数超出此工作流允许范围');
+        }
+        answer={response:{optionId:selected.optionId,content:{...workflowChanges}}};
+      }
+      await call('zcode_answer',{session_id:p.sessionId,request_id:String(request.id),caller_permission_mode:'full_access',user_approved:true,...answer});
+      pendingSignature='';await renderPending();notice('回复已提交');
+    }catch(e){notice(e.message,true)}finally{answering=false}};
+    const preview=el('details'),heading=el('summary','查看完整原生请求');
+    preview.append(heading,el('pre',JSON.stringify(p,null,2)));row.append(preview);
+    if(p.unsupported){row.append(el('div','该原生交互需要在 ZCode 中处理，完整请求已列出。','notice error'));root.append(row);continue;}
+    if(request.method==='interaction/requestWorkspaceHookReview'){
+      const selected=[];
+      row.append(el('div','选择要信任的工作区脚本；启停、撤销信任均使用当前审查记录。','small'));
+      for(const item of p.items||[]){
+        const label=el('label'),check=el('input');check.type='checkbox';
+        label.append(check,el('span',item.displayName+' · '+item.event+' · '+item.trustState));
+        row.append(label,el('pre',item.displayCommand),el('div',item.sourcePath,'small'));
+        selected.push({item,check});
+        if(item.editable){const toggle=el('button',item.configuredEnabled?'禁用此项':'启用此项','secondary');
+          toggle.onclick=()=>send({response:{action:'accept',content:{action:'toggle',reviewItemId:item.reviewItemId,enabled:!item.configuredEnabled}}});row.append(toggle);}
+      }
+      for(const [action,label]of [['trust_selected','信任所选脚本'],['revoke','撤销所选信任']]){
+        const button=el('button',label,action==='revoke'?'secondary':'');button.onclick=()=>{
+          const ids=selected.filter(v=>v.check.checked).map(v=>v.item.reviewItemId);
+          if(!ids.length){notice('请至少选择一项',true);return;}
+          return send({response:{action:'accept',content:{action,reviewItemIds:ids}}});
+        };row.append(button);
+      }
+      root.append(row);continue;
+    }
+    if(p.workflowRevisionOption&&workflowInput){
+      row.append(el('div','批准时使用的工作流设置（未修改的字段保持原值）','small'));
+      if(workflowInput.adjustable_settings.subagent_model){
+        const select=el('select'),values=new Map([['','保持当前模型'],['__inherit__','跟随主会话']]);
+        if(typeof workflowInput.subagent_model==='string')values.set(workflowInput.subagent_model,'当前：'+workflowInput.subagent_model);
+        for(const m of models){
+          const base=m.ref.providerId+'/'+m.ref.modelId,label=m.providerLabel+' · '+m.label;
+          values.set(base,label+' · 默认思考');
+          for(const level of m.reasoning?.levels||[])values.set(base+'$'+level.value,label+' · '+(level.label||level.value));
+        }
+        for(const [value,label]of values){const option=el('option',label);option.value=value;select.append(option);}
+        select.value='';select.onchange=()=>{if(select.value==='')delete workflowChanges.subagent_model;else workflowChanges.subagent_model=select.value==='__inherit__'?null:select.value};
+        row.append(el('label','子代理模型与思考强度'),select);
+      }
+      const number=el('input');number.type='number';number.min=1;
+      const ceiling=workflowInput.adjustable_settings.concurrency_ceiling;if(Number.isInteger(ceiling))number.max=ceiling;
+      number.value=String(workflowInput.max_concurrency??'');number.placeholder='留空使用默认值';
+      number.onchange=()=>workflowChanges.max_concurrency=number.value===''?null:Number(number.value);
+      workflowNumber=number;row.append(el('label','最大并发数'),number);
+    }
+    const choices=el('div',undefined,'options');
+    for(const opt of interactionChoices(p)){
+      if(opt.requiresFreeText)continue;
+      const b=el('button',opt.label||opt.name||opt.kind||opt.optionId);
+      if(opt.description)b.title=opt.description;
+      if(/deny|reject/i.test(opt.kind||''))b.className='secondary';
+      b.onclick=()=>send(request.method==='interaction/requestPermission'
+        ?{option_id:opt.optionId}:{response:{action:'accept',optionId:opt.optionId}});
+      choices.append(b);
+    }
+    if(choices.children.length)row.append(choices);
+    const questions=p.questions||p.input?.questions||[];
+    if(request.method!=='interaction/requestPermission'&&questions.length){
+      const fields=[];
+      for(const q of questions){
+        row.append(el('label',(q.header?q.header+'：':'')+q.question));
+        const select=el('select');select.multiple=!!q.multiSelect;
+        const draft=p.answerDrafts?.[q.question]||[];
+        for(const opt of q.options||[]){
+          const option=el('option',opt.label+(opt.description?' — '+opt.description:''));
+          option.value=opt.value??opt.label;option.selected=draft.includes(option.value);if(opt.preview)option.title=opt.preview;select.append(option);
+        }
+        if(!q.multiSelect&&draft.length&&select.options.some(o=>o.value===draft[0]))select.value=draft[0];
+        if(select.options.length)row.append(select);
+        const extras=draft.filter(value=>!Array.from(select.options).some(o=>o.value===value));
+        const inputs=[];
+        for(const value of [...extras,...(p.freeText!==false?['']:[])]){
+          const input=el('input');input.value=value;input.placeholder='自定义回答（可选）';row.append(input);inputs.push(input);
+        }
+        fields.push({q,select,inputs});
+      }
+      const submit=el('button','提交回答');submit.onclick=()=>{
+        const answers=Object.create(null);for(const {q,select,inputs}of fields){
+          const selected=q.multiSelect?Array.from(select.selectedOptions).map(x=>x.value):select.value;
+          const custom=inputs.map(input=>input.value).filter(value=>value.trim());
+          answers[q.question]=q.multiSelect?[...selected,...custom]:custom[0]??selected;
+        }
+        return send({response:{action:'accept',content:{answers}}});
+      };row.append(submit);
+    }else if(p.freeText===true||p.workflowRevisionOption){
+      const permission=request.method==='interaction/requestPermission',revision=p.workflowRevisionOption;
+      const input=el('textarea');input.rows=3;input.placeholder=permission?(revision?'提出修改或补充要求':'填写拒绝原因'):'输入回答';
+      if(p.sensitive)input.setAttribute('data-sensitive','true');
+      const submit=el('button',permission?(revision?'提交修改要求':'拒绝并说明'):'提交回答');
+      submit.onclick=()=>send({response:{action:permission&&!revision?'decline':'accept',
+        ...(revision?{optionId:revision.optionId}:{}),freeText:input.value}});row.append(input,submit);
+    }
+    const actions=el('div',undefined,'options');
+    for(const [action,label]of [['decline','拒绝'],['cancel','取消']]){
+      const b=el('button',label,'secondary');b.onclick=()=>send({response:{action}});actions.append(b);
+    }row.append(actions);
+    const advanced=el('details'),editor=el('textarea'),submit=el('button','提交结构化回复');
+    editor.rows=6;editor.value=JSON.stringify({action:'accept',content:{}},null,2);
+    submit.onclick=()=>{try{return send({response:JSON.parse(editor.value)})}catch(e){notice(e.message,true)}};
+    advanced.append(el('summary','结构化回复（高级）'),editor,submit);row.append(advanced);root.append(row);
+  }
+  if(!root.children.length)root.append(el('span','暂无待处理请求'));
+  if(data.unavailable_session_ids?.length)root.append(el('div',data.unavailable_session_ids.length+' 个会话暂时无法读取，请选择目标会话重试。','small'));
+  }catch(e){$('pending-state').textContent='读取失败：'+e.message;throw e;}finally{pendingBusy=false;}
+}
+$('pending-session').onchange=()=>{pendingSignature='';$('pending').replaceChildren(el('span','正在读取目标会话'));return renderPending()};
 function renderNotifications(state){const data=state.notifications||{};const cap=data.host_capability||{},delivery=data.delivery||{};const error=cap.error_code||'';const label=cap.state==='supported'?'宿主已支持':cap.state==='unsupported'?(error==='handshake_failed'?'握手失败（未确认）':'宿主不支持'):cap.state==='pipe_unavailable'?'本机管道不可用':cap.state==='degraded'?'宿主暂不可用':cap.state==='host_unavailable'?'宿主未连接':cap.state==='not_probed'?'未探测':'宿主未连接';$('notify-capability').textContent=label;const states=Object.entries(data.states||{}).map(([k,v])=>k+' '+v).join(' · ')||'无订阅';const sends=Object.entries(delivery).map(([k,v])=>k+' '+v).join(' · ')||'无事件';$('notify-summary').textContent='订阅：'+states+'；事件：'+(data.events||0)+'（'+sends+'）'+(data.store_incompatible?'；通知存储不兼容，已隔离旧文件':'')}
-async function refresh(){try{cfg=await call('zcode_settings');for(const [id,key]of Object.entries({workspace:'default_workspace',exe:'zcode_executable','native-control':'desktop_native_control_file'}))$(id).value=cfg[key];for(const [id,key]of Object.entries({ 'notify-poll':'completion_notify_poll_seconds','notify-start':'completion_notify_start_timeout_seconds','notify-expiry':'completion_notify_expiry_hours','notify-attempts':'completion_notify_wake_attempts','stall-seconds':'superagent_stall_seconds','read-threshold':'superagent_read_failure_threshold'}))$(id).value=cfg[key];$('workflow').value=cfg.default_workflow_mode;$('autostart').checked=cfg.auto_launch_desktop;const [catalog,state]=await Promise.all([call('zcode_models'),call('zcode_status')]);models=catalog.available||[];renderModels();renderSessions(state);renderNotifications(state);await renderPending();notice('连接正常，共读取 '+models.length+' 个已配置模型')}catch(e){notice(e.message,true)}}
+function renderWorkflowAuthorization(state){const p=state.native_transport?.workflow_authorization;$('workflow-authorization-state').textContent=p?.state==='configuration_unavailable'?'ZCode 侧授权配置不可读取或无效':p?.running?(p.mode!==cfg.workflow_authorization_mode?'设置尚未同步到 ZCode 侧，请保存配置':'ZCode 侧授权服务已运行：'+(p.mode==='automatic'?'全自动':'手动选择')):p?.state==='desktop_not_running'?'ZCode 尚未运行':'需要更新并重新加载本机原生接入后生效';}
+async function refresh(){try{cfg=await call('zcode_settings');for(const [id,key]of Object.entries({workspace:'default_workspace',exe:'zcode_executable','native-control':'desktop_native_control_file','workflow-authorization':'workflow_authorization_mode'}))$(id).value=cfg[key];for(const [id,key]of Object.entries({ 'notify-poll':'completion_notify_poll_seconds','notify-start':'completion_notify_start_timeout_seconds','notify-expiry':'completion_notify_expiry_hours','notify-attempts':'completion_notify_wake_attempts','stall-seconds':'superagent_stall_seconds','read-threshold':'superagent_read_failure_threshold'}))$(id).value=cfg[key];$('workflow').value=cfg.default_workflow_mode;$('autostart').checked=cfg.auto_launch_desktop;const [catalog,state]=await Promise.all([call('zcode_models'),call('zcode_status')]);models=catalog.available||[];renderModels();renderSessions(state);renderNotifications(state);renderWorkflowAuthorization(state);renderInteractionSessionSelector(state);await renderPending();notice('连接正常，共读取 '+models.length+' 个已配置模型')}catch(e){notice(e.message,true)}}
 $('model').onchange=updateThought;$('refresh').onclick=refresh;$('reload-models').onclick=refresh;
-$('save').onclick=async()=>{try{$('save').disabled=true;const changes={default_workspace:$('workspace').value,default_model:JSON.parse($('model').value),default_thought_level:$('thought').value,default_workflow_mode:$('workflow').value,auto_launch_desktop:$('autostart').checked,zcode_executable:$('exe').value,desktop_native_control_file:$('native-control').value,completion_notify_poll_seconds:Number($('notify-poll').value),completion_notify_start_timeout_seconds:Number($('notify-start').value),completion_notify_expiry_hours:Number($('notify-expiry').value),completion_notify_wake_attempts:Number($('notify-attempts').value),superagent_stall_seconds:Number($('stall-seconds').value),superagent_read_failure_threshold:Number($('read-threshold').value)};cfg=await call('zcode_settings',{changes,caller_permission_mode:'full_access'});notice('配置已保存，新会话使用这些默认值；通知的启动等待/过期/重试次数应用到新订阅，轮询间隔在本地桥接服务重启后生效')}catch(e){notice(e.message,true)}finally{$('save').disabled=false}};
+$('save').onclick=async()=>{try{$('save').disabled=true;const changes={default_workspace:$('workspace').value,default_model:JSON.parse($('model').value),default_thought_level:$('thought').value,default_workflow_mode:$('workflow').value,workflow_authorization_mode:$('workflow-authorization').value,auto_launch_desktop:$('autostart').checked,zcode_executable:$('exe').value,desktop_native_control_file:$('native-control').value,completion_notify_poll_seconds:Number($('notify-poll').value),completion_notify_start_timeout_seconds:Number($('notify-start').value),completion_notify_expiry_hours:Number($('notify-expiry').value),completion_notify_wake_attempts:Number($('notify-attempts').value),superagent_stall_seconds:Number($('stall-seconds').value),superagent_read_failure_threshold:Number($('read-threshold').value)};cfg=await call('zcode_settings',{changes,caller_permission_mode:'full_access'});notice('配置已保存；工作流授权模式在支持该功能的 ZCode 宿主中实时生效。通知轮询间隔在桥接后台重载后生效。')}catch(e){notice(e.message,true)}finally{$('save').disabled=false}};
 (async()=>{if(framed&&!window.openai?.callTool&&!localToken){try{await hostRequest('ui/initialize',{appInfo:{name:'Codex to ZCode Bridge',version:'0.1.0'},appCapabilities:{},protocolVersion:'2026-01-26'});window.parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized'},'*')}catch(e){notice(e.message,true);return}}await refresh();setInterval(()=>renderPending().catch(()=>{}),4000)})();
 </script></body></html>

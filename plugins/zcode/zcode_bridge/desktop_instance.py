@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -92,7 +93,11 @@ def inspect_desktop(executable, rows=None):
             continue
         # Electron also uses its executable to run native-host Node workers.
         # They are descendants with a script entry, not Desktop main instances.
-        if (len(arguments) > 1 and Path(arguments[1]).suffix.lower() in ('.js', '.cjs', '.mjs')
+        script_index = 1
+        while (script_index < len(arguments)
+               and re.fullmatch(r'--max-old-space-size=\d+', arguments[script_index])):
+            script_index += 1
+        if (len(arguments) > script_index and Path(arguments[script_index]).suffix.lower() in ('.js', '.cjs', '.mjs')
                 and row.get('ParentProcessId') in pids):
             continue
         mains.append(row)

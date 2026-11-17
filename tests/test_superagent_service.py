@@ -2349,6 +2349,78 @@ class SuperagentServiceTests(unittest.TestCase):
         self.assertIn('answer_requires_option', str(caught.exception))
         self.assertEqual(native.resolve_calls, [])
 
+    def complete_native_request(self, native, sid, payload):
+        native.interactions = lambda *args: {
+            'sessionId': sid, 'mode': 'yolo', 'interactions': [
+                {'interactionId': 'complete-request', 'kind': payload['kind'],
+                 'createdAt': 1800000000000, 'payload': payload}]}
+
+    def test_generic_native_answer_exposes_and_resolves_session_permission(self):
+        native, delegated = self.native_permission_delegate('full_access')
+        sid = delegated['session_id']
+        self.complete_native_request(native, sid, {
+            'kind': 'permission', 'name': 'CreateWorkflow', 'freeText': True,
+            'options': [{'optionId': 'allow_once', 'label': 'Allow once', 'kind': 'allowOnce'},
+                        {'optionId': 'allowSession', 'label': 'Always allow in this session', 'kind': 'allow_session'}],
+            'fullAccessOption': {'optionId': 'fullAccess', 'label': 'Full access', 'kind': 'custom'}})
+        pending = self.call('zcode_pending', {'session_id': sid})['requests'][0]
+        self.assertTrue(pending['options_complete'])
+        self.assertEqual(pending['params']['fullAccessOption']['label'], 'Full access')
+        answered = self.call('zcode_answer', {'session_id': sid,
+            'request_id': 'complete-request', 'option_id': 'allowSession',
+            'caller_permission_mode': 'full_access'})
+        self.assertTrue(answered['answered'])
+        self.assertEqual(native.resolve_calls[-1]['answer'], {'optionId': 'allowSession'})
+        self.bridge.client.respond.assert_not_called()
+
+    def test_complete_permission_revision_and_full_access_guard_use_same_request(self):
+        native, delegated = self.native_permission_delegate('full_access')
+        sid = delegated['session_id']
+        self.complete_native_request(native, sid, {'kind': 'permission', 'name': 'CreateWorkflow',
+            'freeText': True, 'options': [],
+            'workflowRevisionOption': {'optionId': 'workflowRefine', 'kind': 'custom',
+                                       'label': 'Request changes', 'requiresFreeText': True},
+            'fullAccessOption': {'optionId': 'fullAccess', 'kind': 'custom', 'label': 'Always allow in this session'}})
+        with self.assertRaisesRegex(ValueError, 'permission_escalation_denied'):
+            self.call('zcode_answer', {'session_id': sid, 'request_id': 'complete-request',
+                'option_id': 'fullAccess', 'caller_permission_mode': 'always_ask', 'user_approved': True})
+        answer = {'action': 'accept', 'freeText': 'Only one workflow at a time'}
+        self.call('zcode_answer', {'session_id': sid, 'request_id': 'complete-request',
+            'response': answer, 'caller_permission_mode': 'full_access'})
+        self.assertEqual(native.resolve_calls[-1]['answer'], {**answer, 'optionId': 'workflowRefine'})
+
+    def test_complete_question_keeps_values_descriptions_previews_and_multi_select(self):
+        native, delegated = self.native_permission_delegate('full_access')
+        sid = delegated['session_id']
+        question = {'question': 'Choose', 'header': 'Options', 'multiSelect': True,
+                    'options': [{'label': 'A', 'value': 'one,two', 'description': 'Description', 'preview': 'Preview'}]}
+        self.complete_native_request(native, sid, {'kind': 'userInput', 'prompt': 'Choose',
+            'freeText': True, 'questions': [question]})
+        pending = self.call('zcode_pending', {'session_id': sid})['requests'][0]
+        self.assertEqual(pending['params']['questions'], [question])
+        answer = {'action': 'accept', 'content': {'answers': {'Choose': ['one,two']}}}
+        self.call('zcode_answer', {'session_id': sid, 'request_id': 'complete-request',
+            'response': answer, 'caller_permission_mode': 'full_access'})
+        self.assertEqual(native.resolve_calls[-1]['answer'], answer)
+
+    def test_single_answer_preserves_exact_question_key_and_explicit_empty_value(self):
+        request = {'params': {'input': {'questions': [{'question': ' Choose ',
+                    'options': [{'label': 'Unset', 'value': ''}]}]}}}
+        self.assertEqual(self.bridge._single_question_response(request, 'Unset'),
+            {'action': 'accept', 'content': {'answers': {' Choose ': ''}}})
+
+    def test_special_and_unknown_native_interactions_remain_visible(self):
+        native, delegated = self.native_permission_delegate('full_access')
+        sid = delegated['session_id']
+        for kind, method in [('pluginInstall', 'interaction/requestPluginInstall'),
+                             ('workspaceHookReview', 'interaction/requestWorkspaceHookReview'),
+                             ('futureDialog', 'interaction/unsupported')]:
+            self.complete_native_request(native, sid, {'kind': kind, 'items': [], 'reason': 'example'})
+            row = self.call('zcode_pending', {'session_id': sid})['requests'][0]
+            self.assertEqual(row['method'], method)
+            self.assertTrue(row['live_native_pending'])
+            self.assertEqual(row['params']['kind'], kind)
+
     def test_native_permission_custom_option_needs_approval_and_full_caller_allow_is_free(self):
         native, delegated = self.native_permission_delegate()
         with self.assertRaises(ValueError) as caught:

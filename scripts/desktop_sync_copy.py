@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import time
@@ -31,6 +30,7 @@ if os.name == "nt":
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import desktop_sync_shim as shim  # noqa: E402
+from asar_reader import CopyError, _asar_header, asar_entry, extract_asar, read_version_from_asar
 
 HOST_REL = "resources/app/out/host/index.js"
 ENGINE_REL = "resources/glm/zcode.cjs"
@@ -43,92 +43,12 @@ BOOTSTRAP_SOURCE = HERE.parent / "runtime/desktop_sync/bootstrap.mjs"
 BOOTSTRAP_MARKER = "ZCODE_DESKTOP_SYNC_BOOTSTRAP_V1"
 
 
-class CopyError(RuntimeError):
-    pass
-
-
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
-
-
-def _asar_header(path: Path):
-    handle = path.open("rb")
-    try:
-        prefix = handle.read(16)
-        if len(prefix) != 16:
-            raise CopyError("app.asar is truncated")
-        string_size = struct.unpack("<I", prefix[12:16])[0]
-        if string_size <= 0 or string_size > 64 * 1024 * 1024:
-            raise CopyError("app.asar header size is invalid")
-        raw = handle.read(string_size)
-        try:
-            header = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError) as error:
-            raise CopyError(f"app.asar header is not valid JSON: {error}") from error
-        base = 16 + string_size + ((4 - string_size % 4) % 4)
-        return handle, header, base
-    except Exception:
-        handle.close()
-        raise
-
-
-def asar_entry(path: Path, name: str) -> bytes:
-    handle, header, base = _asar_header(path)
-    try:
-        node = header
-        for part in name.split("/"):
-            node = node["files"][part]
-        if "files" in node or "offset" not in node:
-            raise CopyError(f"asar entry is not a file: {name}")
-        handle.seek(base + int(node["offset"]))
-        return handle.read(int(node["size"]))
-    finally:
-        handle.close()
-
-
-def extract_asar(path: Path, destination: Path) -> int:
-    handle, header, base = _asar_header(path)
-    unpacked = path.with_name(path.name + ".unpacked")
-    count = 0
-
-    def write_file(parts, node):
-        nonlocal count
-        relative = Path(*parts)
-        target = (destination / relative).resolve()
-        try:
-            target.relative_to(destination.resolve())
-        except ValueError as error:
-            raise CopyError("asar entry escapes the destination") from error
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if node.get("unpacked"):
-            source = unpacked.joinpath(*parts)
-            if not source.is_file():
-                raise CopyError(f"unpacked asar entry is missing: {source}")
-            shutil.copy2(source, target)
-        else:
-            handle.seek(base + int(node["offset"]))
-            data = handle.read(int(node["size"]))
-            target.write_bytes(data)
-        count += 1
-
-    def walk(node, parts):
-        for name, child in node.get("files", {}).items():
-            if not isinstance(child, dict):
-                raise CopyError("unsupported asar entry shape")
-            if "files" in child:
-                walk(child, parts + [name])
-            else:
-                write_file(parts + [name], child)
-
-    try:
-        walk(header, [])
-    finally:
-        handle.close()
-    return count
 
 
 def copy_tree(source: Path, destination: Path, hardlink: bool) -> None:
@@ -254,17 +174,6 @@ def verify_patched_copy(destination: Path) -> dict:
         "engineReconcilePatch": True,
         "engineSha256": sha256_bytes(engine_bytes),
     }
-
-
-def read_version_from_asar(path: Path) -> str:
-    try:
-        package = json.loads(asar_entry(path, "package.json").decode("utf-8"))
-    except (KeyError, ValueError) as error:
-        raise CopyError("app.asar has no readable package.json") from error
-    version = package.get("version")
-    if not isinstance(version, str) or not version:
-        raise CopyError("app.asar package.json has no version")
-    return version
 
 
 def expected_engine_hash(version: str, manifest: dict | None) -> str:

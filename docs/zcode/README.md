@@ -4,6 +4,14 @@ ZCode 插件，提供桥接管理用的原生 skill、`bridge-settings` 命令�
 
 0.5.4 的 Desktop 控制配置默认使用工作区黑名单，只禁用 C 盘及其子路径；已有白名单可显式迁移。规则和升级边界见 [工作区规则](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/WORKSPACE_POLICY.md)。
 
+工作流授权默认 `automatic`：ZCode 侧根据真实原生交互中的“本会话内始终允许”选项完成授权，不需要 Codex 保持连接。可在设置中将 `workflow_authorization_mode` 改为 `manual`，恢复逐次选择。此策略只处理运行工作流的会话授权，不代答其他问题，也不自动允许其他工具权限；规划只读会话保持只读。
+
+手动面板和 `zcode_pending` 使用完整原生交互，保留会话授权、完整访问、拒绝、取消、修改要求、问题的值/描述/预览和多选信息。`zcode_answer` 可传 `session_id` 和实际 `option_id`，无需电脑点击。完整选项和 ZCode 侧独立自动授权需要配套原生宿主更新；旧宿主会明确显示需要更新，不把配置保存当作已生效。升级不重启运行中的任务，待工作结束后由使用者重新加载 ZCode。
+
+Release ZIP 内也包含匹配的 `scripts/desktop_native_install.py`、相关辅助模块和 `runtime/desktop_sync/`。原生接入仍是显式操作，常规 `install.py` 不修改应用；可先查看该辅助工具的 `--help`，按原版接入说明检查并更新已有宿主。
+
+已有原生接入可使用 `update-host --dry-run` 核对更新；实际 `update-host` 要求先退出 ZCode，只替换校验过的宿主 JS 并更新原安装账本，保留账号、控制文件、会话归属与原始应用备份，不修改引擎或可执行文件，也不自动重启。
+
 0.5.2 支持从完整仓库显式接入兼容的原版 Desktop，保留正常登录与 profile；默认安装器不修改应用。原生新会话按工作区复用唯一活动本机项目，无匹配时明确位于未归属“任务”分组，不自动展开用户分组。安装与回滚见 [原版说明](https://github.com/cateyemizuki/codex-to-zcode-bridge/blob/main/docs/DESKTOP_NATIVE_INSTALL.md)。
 
 ## 手动安装
@@ -78,7 +86,7 @@ ZCode 侧可以用 `zcode_notify_emit` 主动写入提示：
 
 需要为子代理分别选模型和强度时，使用 ZCode 原生动态工作流并加载它自己的 skill。GPT 侧只需要简短的自然语言能力说明。
 
-当前权限由发起工具提供；完全访问不能免除首次工作流的真实授权。不要根据其他会话的历史权限提升当前会话。`zcode_notify_emit` 和所有通知变更同样要传当前真实权限。
+当前权限由发起工具提供。工作流授权仍以实际原生请求和真实选项为依据；ZCode 侧默认策略自动选择会话授权，手动模式由使用者选择。不要根据其他会话的历史权限提升当前会话。`zcode_notify_emit` 和所有通知变更同样要传当前真实权限。
 
 宿主唤醒是版本相关能力，只使用标准 MCP stdio 探测第一方 `send_message_to_thread`。缺少工具、握手失败或本机管道不可用时，事件保留在待送队列；跨版本不保证，2026-11-14 已在真实 Codex Desktop chat 上验证模型任务完成后自动续工；该结果限于实测版本，详见仓库验证记录。桥接不实现私有 pipe 协议，不修改应用、二进制或数据库，也不使用 CLI `codex queue --thread ... --resume` 假装续工。
 

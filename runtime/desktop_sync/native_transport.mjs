@@ -8,8 +8,29 @@ const __zcodeNativeModes = Object.freeze({
   ask_before_writes: 'build', always_ask: 'build', read_only: 'plan',
 });
 
+export function createZcodeNativeInteractionReader(readSnapshot) {
+  const queues = new Map();
+  return async target => {
+    // Workspace aliases can point at the same live session. Serialize by SID;
+    // this is a gate only, never a cache that could return another target's data.
+    const key = target.sessionId;
+    const work = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(async () => {
+      const current = await readSnapshot(target);
+      if (!Array.isArray(current?.pendingInteractions) || typeof current?.config?.mode !== 'string') {
+        throw Object.assign(new Error('Native interactions are unavailable'), { code: 'native_interactions_shape_invalid' });
+      }
+      return { sessionId: target.sessionId, logEpoch: current.logEpoch, revision: current.revision,
+        mode: current.config.mode, interactions: current.pendingInteractions };
+    });
+    queues.set(key, work);
+    try { return await work; }
+    finally { if (queues.get(key) === work) queues.delete(key); }
+  };
+}
+
 export function createZcodeDesktopNativeTransport({
   agent, makeEnvelope, ownershipPath, resolveWorkspace, resolveProjectId = null, syncer = () => null,
+  readInteractions = null,
   fs = __zcodeNativeFs, now = Date.now,
 }) {
   // The host passes a private facade. No generic RPC, engine or connection is returned.
@@ -268,6 +289,40 @@ export function createZcodeDesktopNativeTransport({
     return result;
   }
   const FULL_ACCESS_OPTION_ID = 'fullAccess';
+  async function completeInteractions(workspace, sid, current = null) {
+    if (typeof readInteractions !== 'function') fail('unsupported', 'native interactions require a host update');
+    // A subscription must not cold-resume an unavailable session just to read a
+    // question. Confirm the owned runtime is readable before the SDK snapshot.
+    if (!current) await snapshot(workspace, sid);
+    const result = await readInteractions(targetOf(workspace, sid));
+    if (!plain(result) || result.sessionId !== sid || !Array.isArray(result.interactions)) {
+      fail('native_interactions_shape_invalid');
+    }
+    const interactions = result.interactions.map(row => {
+      if (row?.kind === 'pluginInstall') {
+        // These two IDs are the fixed actions used by Desktop's plugin card;
+        // keep their provenance explicit instead of inventing permission modes.
+        return { ...row, payload: { ...row.payload, options: [
+          { optionId: 'skip', label: 'Skip', kind: 'reject_once', source: 'native_plugin_ui' },
+          { optionId: 'install', label: row.payload.action === 'enable' ? 'Enable' : 'Install and enable',
+            kind: 'allow_once', source: 'native_plugin_ui' },
+        ] } };
+      }
+      if (row?.kind === 'workspaceHookReview') {
+        return { ...row, payload: { ...row.payload, hookActions: [
+          'trust_selected', 'toggle', 'revoke',
+        ], hookActionsSource: 'native_workspace_hook_controls' } };
+      }
+      if (row?.kind !== 'permission' || !['CreateWorkflow', 'AmendWorkflow'].includes(row.payload?.toolName ?? row.payload?.name)) return row;
+      // Same fixed UI action as Desktop 3.18.2's workflow permission form.
+      // It is deliberately separate from the raw protocol option rows.
+      return { ...row, payload: { ...row.payload, workflowRevisionOption: {
+        optionId: 'workflowRefine', kind: 'custom', label: 'Request changes',
+        requiresFreeText: true, source: 'native_workflow_ui',
+      } } };
+    });
+    return { ...result, interactions, optionsComplete: true };
+  }
   function pendingInteraction(current, interactionId) {
     // 3.18.2 keeps real interactions in pendingInteractions and keeps
     // AskUserQuestion in pendingPermissions. Only an actual pending row may be
@@ -551,6 +606,7 @@ export function createZcodeDesktopNativeTransport({
       return result;
     }
     if (op === 'native_snapshot') return snapshot(workspace, sid);
+    if (op === 'native_interactions') return completeInteractions(workspace, sid);
     if (op === 'native_messages') {
       // Et already unwraps the wire {messages}; do not add another wrapper.
       const result = await method('readSessionMessages')({ ...target,
@@ -618,7 +674,7 @@ export function createZcodeDesktopNativeTransport({
     }
     if (op === 'native_resolve') {
       const interactionId = text(message.interaction_id, 'interaction_id');
-      const answer = message.answer;
+      let answer = message.answer;
       if (!plain(answer) || Object.keys(answer).some((key) => !['optionId', 'freeText', 'action', 'content'].includes(key))) fail('invalid_answer');
       if (!Object.keys(answer).length) fail('invalid_answer');
       if (answer.optionId !== undefined) text(answer.optionId, 'option_id');
@@ -628,24 +684,87 @@ export function createZcodeDesktopNativeTransport({
       if (message.user_approved !== undefined && typeof message.user_approved !== 'boolean') fail('invalid_user_approved');
       const declined = ['decline', 'cancel'].includes(answer.action);
       const current = await snapshot(workspace, sid);
-      const interaction = pendingInteraction(current, interactionId);
+      const interaction = typeof readInteractions === 'function'
+        ? (await completeInteractions(workspace, sid, current)).interactions.find(row =>
+          (row?.interactionId ?? row?.id) === interactionId)
+        : pendingInteraction(current, interactionId);
       if (!interaction) fail('request_not_pending', 'interaction_id is not pending on this owned session');
+      if (interaction.kind === 'workspaceHookReview') {
+        const payload = interaction.payload, decision = answer.content;
+        if (answer.optionId !== undefined || answer.freeText !== undefined || declined || !plain(decision)) fail('invalid_hook_response');
+        if (payload.sessionId !== sid || payload.interactionId !== interactionId) fail('native_interactions_shape_invalid');
+        const target = {};
+        for (const key of ['sessionId', 'taskId', 'runId', 'workspaceIdentity', 'bundleDigest', 'reviewFlowId', 'generation', 'interactionId']) {
+          if (payload[key] === undefined) fail('native_interactions_shape_invalid');
+          target[key] = payload[key];
+        }
+        if (payload.remoteSessionId) fail('unsupported', 'remote workspace Hook reviews require their native host');
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        let type, control, lowersTrust = false;
+        if (decision.action === 'toggle') {
+          if (Object.keys(decision).some(key => !['action', 'reviewItemId', 'enabled'].includes(key))) fail('invalid_hook_response');
+          const item = items.find(row => row.reviewItemId === decision.reviewItemId);
+          if (!item || item.editable !== true || typeof decision.enabled !== 'boolean') fail('invalid_hook_response');
+          type = 'toggleWorkspaceHookReviewItem';
+          control = { reviewItemId: decision.reviewItemId, enabled: decision.enabled };
+          lowersTrust = decision.enabled === false;
+        } else if (['trust_selected', 'revoke'].includes(decision.action)) {
+          if (Object.keys(decision).some(key => !['action', 'reviewItemIds'].includes(key))) fail('invalid_hook_response');
+          const ids = decision.reviewItemIds;
+          if (!Array.isArray(ids) || !ids.length || new Set(ids).size !== ids.length
+              || ids.some(id => !items.some(row => row.reviewItemId === id))) fail('invalid_hook_response');
+          type = decision.action === 'revoke' ? 'revokeWorkspaceHookTrust' : 'respondWorkspaceHookReview';
+          control = decision.action === 'revoke' ? { reviewItemIds: ids }
+            : { decision: { action: 'trust_selected', reviewItemIds: ids } };
+          lowersTrust = decision.action === 'revoke';
+        } else fail('invalid_hook_response');
+        if (!lowersTrust) {
+          if (access.mode === 'plan') fail('read_only_resolution_not_allowed');
+          if (access.caller !== 'full_access' && message.user_approved !== true) fail('user_approved_required');
+        }
+        return command(message, workspace, sid, type, { ...target, ...control }, request);
+      }
+      if (!['permission', 'userInput', 'pluginInstall'].includes(interaction.kind)) fail('unsupported_interaction_kind');
+      if (interaction.kind === 'pluginInstall') {
+        if (declined) answer = { optionId: 'skip' };
+        if (!['install', 'skip'].includes(answer.optionId) || Object.keys(answer).some(key => !['optionId', 'action'].includes(key))) fail('invalid_plugin_response');
+        if (answer.optionId === 'install') {
+          if (access.mode === 'plan') fail('read_only_resolution_not_allowed');
+          if (access.caller !== 'full_access' && message.user_approved !== true) fail('user_approved_required');
+        }
+        return command(message, workspace, sid, 'resolveInteraction', { interactionId, answer: { optionId: answer.optionId } }, request);
+      }
+      if (interaction.kind === 'permission' && !declined && answer.freeText !== undefined
+          && answer.optionId === undefined && interaction.payload.workflowRevisionOption) {
+        answer = { ...answer, optionId: interaction.payload.workflowRevisionOption.optionId };
+      }
       let denies = declined;
+      let sessionConsent = false;
       if (interaction.kind === 'permission') {
         let selected = null;
+        if (declined && answer.freeText !== undefined && interaction.payload.freeText !== true) {
+          fail('invalid_answer', 'this permission does not accept a refusal reason');
+        }
         if (!declined) {
           if (answer.optionId === undefined) fail('answer_requires_option', 'permission answers require a real optionId');
-          if (answer.freeText !== undefined || answer.content !== undefined) {
-            fail('invalid_answer', 'permission answers accept only optionId/action');
+          if (answer.content !== undefined && interaction.payload.freeText !== true && !interaction.payload.workflowRevisionOption) {
+            fail('invalid_answer', 'this permission does not accept a structured revision');
           }
           const options = interaction.payload.options.filter(plain);
+          if (plain(interaction.payload.workflowRevisionOption)) options.push(interaction.payload.workflowRevisionOption);
           const fullAccess = plain(interaction.payload.fullAccessOption)
-            ? interaction.payload.fullAccessOption : null;
+            ? interaction.payload.fullAccessOption : interaction.payload.modeSwitch === 'fullAccessOnly'
+              ? { optionId: FULL_ACCESS_OPTION_ID, kind: 'custom', label: 'Full access' } : null;
           selected = options.find((row) => row.optionId === answer.optionId)
             || (fullAccess && fullAccess.optionId === answer.optionId ? fullAccess : null);
           if (!selected) fail('option_not_in_request', 'answer.optionId is not one of the pending permission options');
+          if (selected.requiresFreeText && !answer.freeText?.trim()) fail('invalid_answer', 'a workflow revision needs feedback');
+          if (answer.freeText !== undefined && !selected.requiresFreeText && interaction.payload.freeText !== true) {
+            fail('invalid_answer', 'this permission does not accept free text');
+          }
+          sessionConsent = selected.kind === 'allow_session' || selected.optionId === 'allowSession';
           const decision = plain(selected.response) ? selected.response.decision : undefined;
-          denies = selected.kind === 'deny' || decision === 'deny';
+          denies = /^(deny|reject)/i.test(selected.kind ?? '') || decision === 'deny';
           if (access.mode === 'plan' && !denies) fail('read_only_resolution_not_allowed');
           if (selected.optionId === FULL_ACCESS_OPTION_ID) {
             // 3.18.2 maps this option to yolo. A weaker caller grant cannot
@@ -658,14 +777,22 @@ export function createZcodeDesktopNativeTransport({
           }
         }
       } else if (answer.optionId !== undefined) {
-        fail('invalid_answer', 'user input answers do not accept a permission optionId');
+        if (!(interaction.payload.options ?? []).some(option => option?.optionId === answer.optionId)) {
+          fail('option_not_in_request', 'user input option is not in the actual question');
+        }
       }
       if (access.mode === 'plan' && !denies) fail('read_only_resolution_not_allowed');
-      if (!denies) await setPermission(workspace, sid, current, access.mode);
+      // The SDK's real fullAccess choice performs its own session transition;
+      // do not try a separate mode setter while its workflow prompt is pending.
+      const sdkTransition = interaction.kind === 'permission' && (answer.optionId === FULL_ACCESS_OPTION_ID
+        || access.caller === 'full_access' && (sessionConsent || answer.freeText !== undefined));
+      if (!denies && !sdkTransition) {
+        await setPermission(workspace, sid, current, access.mode);
+      }
       // A refusal cannot smuggle an option that the engine might treat as an
       // approval or a mode switch.
       const payloadAnswer = interaction.kind === 'permission' && declined
-        ? { action: answer.action } : answer;
+        ? { action: answer.action, ...(answer.freeText !== undefined ? { freeText: answer.freeText } : {}) } : answer;
       return command(message, workspace, sid, 'resolveInteraction', { interactionId, answer: payloadAnswer }, request);
     }
     if (op === 'native_cancel') {
@@ -675,7 +802,7 @@ export function createZcodeDesktopNativeTransport({
     fail('unsupported', op);
   }
   const operations = new Set(['native_create', 'native_send', 'native_snapshot', 'native_messages', 'native_events',
-    'native_resolve', 'native_workflows', 'native_workflow_events', 'native_cancel', 'native_pending',
+    'native_resolve', 'native_workflows', 'native_workflow_events', 'native_cancel', 'native_pending', 'native_interactions',
     'native_model_catalog', 'native_children', 'native_topology', 'native_lifecycle',
     'native_child_messages', 'native_child_snapshot']);
   const mutation = new Set(['native_create', 'native_send', 'native_resolve', 'native_cancel', 'native_model_catalog']);

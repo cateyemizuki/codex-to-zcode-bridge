@@ -46,6 +46,7 @@ def defaults():
         **paths(),
         'default_model': {'providerId': os.environ.get('ZCODE_MODEL_PROVIDER', ''), 'modelId': os.environ.get('ZCODE_MODEL_ID', '')},
         'default_thought_level': 'auto', 'default_workflow_mode': 'onDemand',
+        'workflow_authorization_mode': 'automatic',
         # Optional local profiles for high-level delegation.  Empty defaults:
         # no author path, workspace or provider id is published here.
         'superagent_profiles': {}, 'superagent_default_profile': '',
@@ -144,6 +145,8 @@ def _save_config(changes):
         raise ValueError('默认工作区不存在')
     if result['default_workflow_mode'] not in ('disabled', 'onDemand', 'alwaysOn'):
         raise ValueError('工作流模式无效')
+    if result['workflow_authorization_mode'] not in ('automatic', 'manual'):
+        raise ValueError('工作流授权模式无效')
     if type(result['auto_launch_desktop']) is not bool:
         raise ValueError('自动启动开关必须是布尔值')
     if not isinstance(result['node_executable'], str) or (result['node_executable'] and not Path(result['node_executable']).is_file()):

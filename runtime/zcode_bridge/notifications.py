@@ -1965,14 +1965,18 @@ class Observer:
         native_completed = bool(native.get('native_turn_completed'))
         anchor = (turn.get('user_message_id') or native_started_id
                   or turn.get('send_result_message_id') or turn.get('before_message_id') or '')
-        page = self.runtime.messages(sid, anchor, deadline)
-        rows = (page or {}).get('messages') or []
         input_id = str(turn.get('input_id') or '')
+        before_id = str(turn.get('before_message_id') or '')
+        # Native cursors exclude the anchor row. Re-read from the pre-send
+        # baseline so the input echo remains present on every observation;
+        # never trust an absent anchor merely because a cursor was supplied.
+        page_anchor = before_id if input_id and sub.get('arm_basis') == 'send_accepted' else anchor
+        page = self.runtime.messages(sid, page_anchor, deadline)
+        rows = (page or {}).get('messages') or []
         anchor_proof = ''
         user_message_id = ''
         final_message_id = ''
         final_after_anchor = False
-        before_id = str(turn.get('before_message_id') or '')
         last_assistant = ''
         last_assistant_message = None
 

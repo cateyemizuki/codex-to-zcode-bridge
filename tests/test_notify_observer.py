@@ -814,6 +814,23 @@ class NativeObserverTests(ObserverHarness):
         self.assertFalse(result['final_after_anchor'])
         self.assertEqual(result['final_message_id'], '')
 
+    def test_metadata_anchor_survives_a_cursor_that_excludes_the_anchor_row(self):
+        sub = self.metadata_arm()
+        self.runtime.message_rows = [
+            {'info': {'messageId': 'old-reply', 'role': 'assistant'}, 'parts': []},
+            {'info': {'messageId': 'new-user', 'role': 'user', 'metadata': {
+                'inputIntent': {'sourceCommandId': 'native-cmd-1'}}}, 'parts': []},
+            {'info': {'messageId': 'new-reply', 'role': 'assistant'}, 'parts': [{'type':'text','text':'DONE'}]},
+        ]
+        def exclusive_page(sid, anchor, deadline=None):
+            rows = copy.deepcopy(self.runtime.message_rows)
+            index = next((i for i, row in enumerate(rows) if row['info']['messageId'] == anchor), -1)
+            return {'messages': rows[index + 1:]}
+        self.runtime.messages = exclusive_page
+        self.tick(); self.tick(); self.tick()
+        self.assertEqual(self.store.find_subscription(sub['subscription_id'])['state'], 'completed')
+        self.assertEqual(len(events_of(self.store, 'turn.completed')), 1)
+
     def test_assistant_metadata_cannot_claim_a_user_input_anchor(self):
         sub = self.metadata_arm()
         self.runtime.message_rows = [
